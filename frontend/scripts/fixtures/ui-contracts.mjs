@@ -165,6 +165,8 @@ function dayMinus(day, n) {
 const ROLLING_START_LOCAL = `${dayMinus(AS_OF_DAY, 1)}T${AS_OF.slice(11, 16)}`;
 const ROLLING_START_UTC = `${dayMinus(AS_OF_DAY, 1)}T14:00:00Z`;
 const PRICING_REVISION = "rev-synthetic-1";
+// 后端 model::UNKNOWN_PROJECT：聚合分组键、明细行兜底与下钻筛选共用同一判定。
+const UNKNOWN_PROJECT = "(未知)";
 
 /** 构造一个合成 Group。 */
 function group(key, input, opts = {}) {
@@ -187,7 +189,7 @@ function group(key, input, opts = {}) {
     // v0.9.2：费用列单一显示金额（互不重叠贡献合并）+ 部分缺失标记。
     // v0.9.2（第四轮复核）：有实际用量获得估算覆盖（零元费率也算），
     // 不能从金额或「找到候选」推断。
-    has_estimated_cost: opts.has_estimated_cost ?? ((opts.cost_usd ?? 0) > 0),
+    has_estimated_cost: opts.has_estimated_cost ?? (opts.cost_usd ?? 0) > 0,
     total_cost_usd: opts.total_cost_usd,
     cost_partially_unknown: opts.cost_partially_unknown,
     // v0.9.2 第十一轮：费用依据含「线上缺缓存价按 0 估算」（金额可确定）。
@@ -221,9 +223,7 @@ function totals(groups) {
     }
     // v0.9.1 缺陷 C：totals 构成聚合（与后端 finish 同规则）。
     costDetail =
-      g.cost_detail === "mixed" || costDetail === "mixed"
-        ? "mixed"
-        : (g.cost_detail ?? costDetail);
+      g.cost_detail === "mixed" || costDetail === "mixed" ? "mixed" : (g.cost_detail ?? costDetail);
     // 8.2：totals 覆盖状态聚合（任一 partial → partial；full+absent →
     // partial；全 absent → absent；全 full → full）。
     sourceState =
@@ -246,15 +246,10 @@ function totals(groups) {
     unknown_tokens: ut,
     cost_detail: costDetail,
     has_estimated_cost: estimated,
-    ...(sourceCost != null || sourceState != null
-      ? { source_cost_state: sourceState }
-      : {}),
+    ...(sourceCost != null || sourceState != null ? { source_cost_state: sourceState } : {}),
     ...(sourceCost != null ? { source_cost_usd: sourceCost } : {}),
-    ...(estimated || sourceCost != null
-      ? { total_cost_usd: cost + (sourceCost ?? 0) }
-      : {}),
-    cost_partially_unknown:
-      ut.input + ut.output + ut.cache_write + ut.cache_read > 0,
+    ...(estimated || sourceCost != null ? { total_cost_usd: cost + (sourceCost ?? 0) } : {}),
+    cost_partially_unknown: ut.input + ut.output + ut.cache_write + ut.cache_read > 0,
   };
 }
 
@@ -277,6 +272,61 @@ function eventRow(i, opts = {}) {
     cache_read: 0,
     cost_usd: opts.cost_usd === undefined ? 0.0126 : opts.cost_usd,
     cost_breakdown: opts.breakdown === null ? null : breakdown(opts.cost_usd ?? 0.0126),
+    // v0.9.4：下钻按规范身份键筛选（后端 canonical_identity_key），明细仍显示
+    // 原始渠道 ID。identity 缺省时退回 model（与旧 fixture 逐字节兼容）。
+    ...(opts.identity ? { identity: opts.identity } : {}),
+    // v0.9.4：该请求用量已计入当日汇总（B 类覆盖标记）。
+    ...(opts.covered_by_rollup ? { covered_by_rollup: opts.covered_by_rollup } : {}),
+  };
+}
+
+/**
+ * v0.9.4：一条 CCS 日汇总下钻行（日粒度，非逐请求事件）。model = 规范身份键
+ * （与聚合分组同键，下钻筛选可命中）；rollup 元数据与后端 RollupRowMeta 对齐，
+ * 费用构成字段供分组费用浮层复用。ts 即统计日，不补造时分秒/请求 ID/项目。
+ */
+function rollupRow(day, opts = {}) {
+  const cost = opts.cost_usd ?? 0;
+  const sourceCost = opts.source_cost_usd ?? null;
+  // 后端 rollup_cost_parts：来源费用已给出时不再估算（估算部分为 0），
+  // 行金额 = 估算 + 来源，与分组费用列同一口径。
+  const estimated = sourceCost != null ? 0 : cost;
+  const meta = {
+    day,
+    source_tz: opts.source_tz ?? "Asia/Shanghai",
+    source: opts.source ?? "ccs",
+    requests: opts.requests ?? 1,
+    label: opts.label ?? "Claude Opus 4.7",
+    models: opts.models ?? ["anthropic/claude-opus-4-7", "claude-opus-4-7"],
+    cost_usd: estimated,
+    total_cost_usd: opts.total_cost_usd ?? cost,
+    source_cost_usd: sourceCost,
+    source_cost_state: opts.source_cost_state ?? (sourceCost != null ? "full" : "absent"),
+    cost_detail: "rollup_only",
+    unknown_pricing: opts.unknown_pricing ?? false,
+    unknown_reason: opts.unknown_reason ?? null,
+    unknown_tokens: opts.unknown_tokens ?? { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    cost_partially_unknown: opts.cost_partially_unknown ?? false,
+    has_estimated_cost: opts.has_estimated_cost ?? estimated > 0,
+    cache_write_split_estimated: false,
+    cache_price_zero_estimated: opts.cache_price_zero_estimated ?? false,
+  };
+  return {
+    ts: day,
+    // 日汇总没有请求 ID/会话/项目（后端一律空串），不补造。
+    record_id: "",
+    cursor: `rollup|${opts.model ?? "claudeopus47"}|${day}`,
+    agent: "claude-code",
+    model: opts.model ?? "claudeopus47",
+    session_id: "",
+    project: "",
+    input: opts.input ?? 0,
+    output: opts.output ?? 0,
+    cache_write: opts.cache_write ?? 0,
+    cache_read: opts.cache_read ?? 0,
+    cost_usd: cost,
+    cost_breakdown: null,
+    rollup: meta,
   };
 }
 
@@ -705,6 +755,68 @@ const SOURCE_COST_GROUPS = [
   }),
 ];
 
+// v0.9.4：跨渠道别名合并 + CCS 日汇总下钻 fixture。
+// - anthropic/claudefable52：两个渠道 ID（anthropic/claude-fable-5.2 与
+//   claude-fable-5-2）经**已核实别名映射**归一为**一行**（补修一：真实快照
+//   有 24 个同末段候选，不再依赖「目录唯一候选」），下钻仍见两侧原始 ID。
+// - claudeopus47：纯日汇总（无逐请求记录），下钻按两天返回两条 CCS 行。
+// - claudesonnet45：mixed——原生请求 + 被覆盖请求 + 日汇总行，验证混合分页。
+const ROLLUP_DRILL_GROUPS = [
+  group("anthropic/claudefable52", 4810, {
+    label: "Claude Fable 5.2",
+    output: 2570,
+    cost_usd: 1.4,
+    total_cost_usd: 1.4,
+    requests: 4,
+  }),
+  group("claudeopus47", 50100000, {
+    label: "Claude Opus 4.7",
+    output: 10050000,
+    cache_write: 20030000,
+    cache_read: 30018123,
+    cost_usd: 801.5,
+    total_cost_usd: 801.5,
+    has_estimated_cost: true,
+    cost_detail: "rollup_only",
+    requests: 234,
+  }),
+  group("claudesonnet45", 2405, {
+    label: "Claude Sonnet 4.5",
+    output: 1285,
+    cost_usd: 0.18,
+    source_cost_usd: 5,
+    total_cost_usd: 5.18,
+    cost_detail: "mixed",
+    source_cost_state: "full",
+    requests: 51,
+  }),
+];
+
+// v0.9.4 补修二：同一批行按项目聚合——CCS 日汇总没有项目归属，与无项目
+// 请求同入「未知」组；被覆盖请求的用量已在日行里，不重复计入具体项目组。
+// 两组之和与按模型视图逐项相等（请求 289 / 总输入 100,155,338 / 费用 808.08）。
+const ROLLUP_DRILL_PROJECT_GROUPS = [
+  group(UNKNOWN_PROJECT, 50102405, {
+    label: UNKNOWN_PROJECT,
+    output: 10051285,
+    cache_write: 20030000,
+    cache_read: 30018123,
+    cost_usd: 801.68,
+    source_cost_usd: 5,
+    total_cost_usd: 806.68,
+    cost_detail: "mixed",
+    source_cost_state: "full",
+    requests: 285,
+  }),
+  group("/home/dev/projects/tokenscope", 4810, {
+    label: "tokenscope",
+    output: 2570,
+    cost_usd: 1.4,
+    total_cost_usd: 1.4,
+    requests: 4,
+  }),
+];
+
 /** 明细行：与汇总同源（empty → 零行；unknown → 未知价行；partial → 混合）。 */
 function rowsFor(kind) {
   switch (kind) {
@@ -746,6 +858,73 @@ function rowsFor(kind) {
       return Array.from({ length: 8 }, (_, i) =>
         eventRow(i + 1, { model: `model-${String(i).padStart(2, "0")}` }),
       );
+    case "rollup-drill":
+      // 行序镜像后端两段：事件段（原生请求）在前，日汇总段在后。
+      return [
+        // Fable：两侧渠道原始 ID，identity 同为规范键（下钻按身份命中两侧）。
+        eventRow(1, {
+          model: "anthropic/claude-fable-5.2",
+          identity: "anthropic/claudefable52",
+          cost_usd: 0.5,
+        }),
+        eventRow(2, {
+          model: "claude-fable-5-2",
+          identity: "anthropic/claudefable52",
+          cost_usd: 0.4,
+        }),
+        eventRow(3, {
+          model: "anthropic/claude-fable-5.2",
+          identity: "anthropic/claudefable52",
+          cost_usd: 0.3,
+        }),
+        eventRow(4, {
+          model: "claude-fable-5-2",
+          identity: "anthropic/claudefable52",
+          cost_usd: 0.2,
+        }),
+        // Sonnet mixed：原生 + 被覆盖请求（事件段），随后日汇总行（汇总段）。
+        // 原生那条无项目归属 → 与 CCS 日行同属「未知」项目组（补修二）。
+        eventRow(5, {
+          model: "claude-sonnet-4-5",
+          identity: "claudesonnet45",
+          cost_usd: 0.18,
+          project: UNKNOWN_PROJECT,
+        }),
+        eventRow(6, {
+          model: "claude-sonnet-4-5",
+          identity: "claudesonnet45",
+          cost_usd: 0.12,
+          covered_by_rollup: "2026-05-28",
+        }),
+        // 汇总段按后端冻结索引排序：日降序，同日按规范身份键升序。
+        // Opus 纯日汇总：两天两条 CCS 行，无逐请求记录。
+        rollupRow("2026-05-29", {
+          requests: 11,
+          input: 100000,
+          output: 50000,
+          cache_write: 30000,
+          cache_read: 18123,
+          cost_usd: 1.5,
+        }),
+        rollupRow("2026-05-28", {
+          requests: 223,
+          input: 50000000,
+          output: 10000000,
+          cache_write: 20000000,
+          cache_read: 30000000,
+          cost_usd: 800,
+        }),
+        rollupRow("2026-05-28", {
+          model: "claudesonnet45",
+          label: "Claude Sonnet 4.5",
+          models: ["claude-sonnet-4-5"],
+          requests: 50,
+          input: 1200,
+          output: 640,
+          cost_usd: 5,
+          source_cost_usd: 5,
+        }),
+      ];
     default:
       return [
         eventRow(1, { cost_usd: 0.0126 }),
@@ -770,9 +949,11 @@ function dimGroups(kind, by, session) {
             ? LONG_GROUPS
             : kind === "source-cost"
               ? SOURCE_COST_GROUPS
-              : kind === "empty"
-                ? []
-                : NORMAL_GROUPS;
+              : kind === "rollup-drill"
+                ? ROLLUP_DRILL_GROUPS
+                : kind === "empty"
+                  ? []
+                  : NORMAL_GROUPS;
   if (kind === "multi") {
     // F02 浏览器契约：同一份真实组件随筛选状态产生 30/20/4/14/0 个类别，
     // 用于验证高度变化、维度切换、按日 7→14 与空→有值时的柱形中间帧。
@@ -831,12 +1012,16 @@ function dimGroups(kind, by, session) {
   }
   if (by === "model") {
     // v0.9.1：source-cost fixture 的 key 是契约的身份锚点（synthetic-*），
-    // 不做 `${kind}-model-${i}` 重写。
-    if (kind === "source-cost") return base;
+    // 不做 `${kind}-model-${i}` 重写。v0.9.4：rollup-drill 同理（规范身份键）。
+    if (kind === "source-cost" || kind === "rollup-drill") return base;
     return base.map((g, i) => ({ ...g, key: `${kind}-model-${i}`, label: null }));
   }
-  if (by === "project")
+  if (by === "project") {
+    // v0.9.4 补修二：rollup-drill 的项目视图保留真实身份键（含「未知」），
+    // 不做 `/proj/${kind}-${i}` 重写——否则契约无法点击「未知」组下钻。
+    if (kind === "rollup-drill") return ROLLUP_DRILL_PROJECT_GROUPS;
     return base.map((g, i) => ({ ...g, key: `/proj/${kind}-${i}`, label: `${kind}-project-${i}` }));
+  }
   if (by === "day") {
     // 日维度的类别必须是日期——否则"切维后不残留旧类别"会被 fixture 自己满足。
     return base.map((g, i) => ({
@@ -1008,13 +1193,26 @@ function createSessionTable(cfg) {
     if (!s) return reject(`query_expired: 会话 ${id} 不存在或已失效，请刷新重试`);
     const rows = s.frozenRows;
     const before = args?.before ?? null;
+    // 下钻过滤与后端一致（模型/项目/日）。v0.9.4：模型按规范身份键命中
+    // （identity 缺省退回 model），明细行仍保留原始渠道 ID 供展示。
+    let scoped = rows;
+    if (args?.model) scoped = scoped.filter((r) => (r.identity ?? r.model) === args.model);
+    // v0.9.4 补修二：日汇总行没有项目归属，只命中「未知」筛选（与聚合分组
+    // 同一判定）；具体项目仍只匹配有该项目归属的请求行。
+    if (args?.project)
+      scoped = scoped.filter((r) =>
+        r.rollup ? args.project === UNKNOWN_PROJECT : r.project === args.project,
+      );
+    if (args?.day) scoped = scoped.filter((r) => r.ts.startsWith(args.day));
+    // 翻页偏移在**当前筛选后的行序**内定位（与后端游标按筛选指纹定位一致）；
+    // 用全量行序的下标切筛选后的列表会漏掉跨页的日汇总行。
     let offset = 0;
     if (before != null) {
       if (!s.cursors.has(before)) {
         // 游标必须属于当前会话（外会话/旧磁盘视图的游标 → 结构化拒绝）。
         return reject("query_expired: 游标不属于当前查询会话，请刷新重试");
       }
-      const idx = rows.findIndex((r) => r.cursor === before);
+      const idx = scoped.findIndex((r) => r.cursor === before);
       offset = idx + 1;
     }
     s.pagesServed += 1;
@@ -1022,11 +1220,6 @@ function createSessionTable(cfg) {
       sessions.delete(id);
       return reject("query_expired: 查询会话已过期，请刷新重试");
     }
-    // 下钻过滤与后端一致（模型/项目/日）
-    let scoped = rows;
-    if (args?.model) scoped = scoped.filter((r) => r.model === args.model);
-    if (args?.project) scoped = scoped.filter((r) => r.project === args.project);
-    if (args?.day) scoped = scoped.filter((r) => r.ts.startsWith(args.day));
     const page = scoped.slice(offset, offset + pageSize);
     for (const r of page) s.cursors.add(r.cursor);
     return {
@@ -1091,9 +1284,10 @@ export function buildFixture(name) {
   }
 
   // PR3：来源行可变集合（cfg.sourceRows 指定初始集；缺省默认两行）。
-  let sourceRows = (cfg.sourceRows ?? "default") === "merged"
-    ? SOURCE_ROWS_MERGED_AND_LONG.map((r) => ({ ...r, origins: [...r.origins] }))
-    : SOURCE_ROWS_DEFAULT.map((r) => ({ ...r, origins: [...r.origins] }));
+  let sourceRows =
+    (cfg.sourceRows ?? "default") === "merged"
+      ? SOURCE_ROWS_MERGED_AND_LONG.map((r) => ({ ...r, origins: [...r.origins] }))
+      : SOURCE_ROWS_DEFAULT.map((r) => ({ ...r, origins: [...r.origins] }));
 
   // 可变状态（错误恢复类 fixture 需要"第一次失败、重试成功"）
   const state = {
@@ -1149,12 +1343,16 @@ export function buildFixture(name) {
       // 这一步必须是物理上可操作的：页面遮罩还在时用户根本点不到保存。
       // U03：第 1 次是应用启动的时区读取，**必须成功**（时区门控靠它放行
       // 业务页）；设置页首读是第 2 次（失败），重试的第 3 次起才挂起。
-      if (n === 1)
-        return { close_action: null, price_auto_sync: true, collect_interval_secs: 300 };
+      if (n === 1) return { close_action: null, price_auto_sync: true, collect_interval_secs: 300 };
       if (n === 2) return reject("设置读取失败（合成）");
       return defer(`settings_get#${n}`);
     }
-    return { close_action: null, price_auto_sync: true, collect_interval_secs: 300, sources: structuredClone(state.savedSources) };
+    return {
+      close_action: null,
+      price_auto_sync: true,
+      collect_interval_secs: 300,
+      sources: structuredClone(state.savedSources),
+    };
   }
 
   /** 挂起的第二次 settings_get 在测试里被释放时使用的"旧值"载荷。 */
@@ -1284,7 +1482,10 @@ export function buildFixture(name) {
         if (cfg.largePricing) {
           const sample = view.entries[0];
           view.entries = Array.from({ length: 8466 }, (_, i) => ({
-            ...sample, prefix: `synthetic-model-${i}`, name: `合成模型 ${i}`, source: "models.dev",
+            ...sample,
+            prefix: `synthetic-model-${i}`,
+            name: `合成模型 ${i}`,
+            source: "models.dev",
           }));
           view.modelsdev_count = 8466;
         }
@@ -1315,18 +1516,14 @@ export function buildFixture(name) {
         const path = String(args?.path ?? "").trim();
         if (!/^[a-zA-Z]:[\/]/.test(path))
           return reject(`目录必须是绝对路径：${path || "（空）"}（合成）`);
-        const exists = sourceRows.find(
-          (r) => r.canonical_identity === path.toLowerCase(),
-        );
-        if (exists)
-          return reject(
-            `目录已在列表中：${exists.path}（合成）`,
-          );
+        const exists = sourceRows.find((r) => r.canonical_identity === path.toLowerCase());
+        if (exists) return reject(`目录已在列表中：${exists.path}（合成）`);
         // 合成口径：C:/Users/dev 的子目录一律按"与默认根嵌套"拒绝（父/子）。
-        if (path.toLowerCase().startsWith("c:/users/dev/") && !path.toLowerCase().includes("history"))
-          return reject(
-            "目录与已有来源存在嵌套关系（合成）：请改用互不嵌套的目录",
-          );
+        if (
+          path.toLowerCase().startsWith("c:/users/dev/") &&
+          !path.toLowerCase().includes("history")
+        )
+          return reject("目录与已有来源存在嵌套关系（合成）：请改用互不嵌套的目录");
         const id = path.toLowerCase();
         sourceRows.push({
           id,
@@ -1348,14 +1545,11 @@ export function buildFixture(name) {
         sourceRows = sourceRows.filter(
           (r) => !(r.agent === args.agent && r.id === args.id && r.origins.includes("手动")),
         );
-        if (sourceRows.length === before)
-          return reject("该行没有可移除的手动目录（合成）");
+        if (sourceRows.length === before) return reject("该行没有可移除的手动目录（合成）");
         return null;
       }
       case "source_path_set_enabled": {
-        const row = sourceRows.find(
-          (r) => r.agent === args.agent && r.id === args.id,
-        );
+        const row = sourceRows.find((r) => r.agent === args.agent && r.id === args.id);
         if (!row) return reject("来源已变化，请重试（合成）");
         row.row_enabled = args.enabled;
         row.enabled = args.enabled && row.origins.includes("默认自动");
@@ -1447,6 +1641,8 @@ const SCENARIOS = {
   "partial-price": { kind: "partial" },
   // v0.9.1 缺陷 B + C：费用列布局与费用状态（rollup_only/0/mixed/缺价）。
   "source-cost": { kind: "source-cost" },
+  // v0.9.4：跨渠道别名合并 + CCS 日汇总下钻（混合分页 pageSize=2）。
+  "rollup-drill": { kind: "rollup-drill", pageSize: 2 },
   // AC08 归因补修：长路径换行断言需要长路径行在列表里——PR3 起默认行
   // 是短路径（SOURCE_ROWS_DEFAULT），必须声明 merged 才含 LONG_SOURCE_DIR
   // 行；此前全矩阵未在本地跑过，该缺口未被察觉。
@@ -1467,7 +1663,11 @@ const SCENARIOS = {
   // PR3 §5：来源目录管理——合并标签/长路径初始集 + 追加/移除/行启停/开关。
   "source-paths-management": { kind: "normal", sourceRows: "merged" },
   // AP04：关闭动作写入被拒绝 → 界面回退到已确认值（quit），错误可见可重试
-  "close-action-write-failure": { kind: "normal", settings: "close-quit", closeWrite: "fail-then-ok" },
+  "close-action-write-failure": {
+    kind: "normal",
+    settings: "close-quit",
+    closeWrite: "fail-then-ok",
+  },
   // AP04：挂起的 settings_get 以 reject 结束 → 不得把已保存值降级成"未知"
   "settings-late-failure-after-save": { kind: "normal", settings: "defer-second-read" },
   // AP06：来源检测首次拒绝 → 错误条重试成功后来源状态就绪，汇总不受影响

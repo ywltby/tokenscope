@@ -92,6 +92,9 @@ pub struct QuerySnapshot {
     /// H06：本次查询固定的日汇总桶选择——只有日粒度的外部历史按桶决定统计
     /// 来源（明细覆盖 / 汇总口径），在建快照时**算一次**后冻结。
     rollup_selection: report::RollupSelection,
+    /// v0.9.4 补修三：下钻日行的分组/顺序/游标定位索引——建快照时算一次
+    /// （不含计价），分页共享；每行费用按需填充并在会话内复用。
+    rollup_drill: report::RollupDrillIndex,
     collection: Arc<report::CollectionSnapshot>,
     /// H07：只读事务快照——汇总与分页都从它读取，采集/导入提交后旧查询不变。
     read: Arc<crate::history::ReadSnapshot>,
@@ -228,17 +231,24 @@ impl QuerySnapshot {
     pub fn rollup_selection(&self) -> &report::RollupSelection {
         &self.rollup_selection
     }
+
+    /// v0.9.4 补修三：冻结的下钻日行索引（分组与顺序只算一次，分页共享）。
+    pub(crate) fn rollup_drill(&self) -> &report::RollupDrillIndex {
+        &self.rollup_drill
+    }
 }
 
 /// 下钻过滤指纹（模型/项目/日——明细侧子查询身份；游标/limit 不参与）。
 /// MP04：模型筛选按**等价身份**归一——同一模型的两种写法（`claude-opus-5-5`
 /// 与 `claude-opus-5.5`）视为同一子查询，游标可在其间续用；不同模型（含
 /// 变体）仍是不同指纹。
-pub(crate) fn drill_fingerprint(filter: &EventFilter) -> String {
+/// v0.9.4：归一再经渠道别名确认（与聚合分组同一规则）——跨渠道写法
+/// 也共享同一子查询指纹。
+pub(crate) fn drill_fingerprint(filter: &EventFilter, pricing: &crate::pricing::Pricing) -> String {
     let model = filter
         .model
         .as_deref()
-        .map(|m| crate::model_identity::ModelIdentity::parse(m).identity_key());
+        .map(|m| pricing.canonical_identity_key(m));
     format!(
         "model={:?}|project={:?}|day={:?}",
         model, filter.project, filter.day
@@ -478,8 +488,8 @@ fn register(snapshot: Arc<QuerySnapshot>) {
 }
 
 /// RC05：一个会话保留的字节 = 采集快照（事件/字符串/价格/诊断）+ 快照行
-/// 索引 + 查询身份/价格修订/时区/主指纹元数据 + 快照结构自身。
-/// 计算全程受检，溢出显式报错。
+/// 索引 + 下钻日行索引（含按需费用单元）+ 查询身份/价格修订/时区/主指纹
+/// 元数据 + 快照结构自身。计算全程受检，溢出显式报错。
 ///
 /// 采集快照与价格表按 Arc **共享**，但这里仍逐会话完整计账（保守、简单，
 /// 宁可重复计账也不漏账）；快照自身持有的 `pricing_revision` 是采集修订号
@@ -487,6 +497,7 @@ fn register(snapshot: Arc<QuerySnapshot>) {
 fn snapshot_retained_bytes(
     collection: &report::CollectionSnapshot,
     rows: &[SnapshotRow],
+    rollup_drill: &report::RollupDrillIndex,
     query_id: &str,
     tz_label: &str,
     main_fingerprint: &str,
@@ -495,6 +506,7 @@ fn snapshot_retained_bytes(
     let mut n = ByteCount::default();
     n.add(report::collection_retained_bytes(collection)?)?;
     n.add(rows_retained_bytes(rows)?)?;
+    n.add(rollup_drill.retained_bytes()?)?;
     n.add(string_bytes(&query_id.to_string())?)?;
     n.add(string_bytes(&tz_label.to_string())?)?;
     n.add(string_bytes(&main_fingerprint.to_string())?)?;
@@ -604,12 +616,51 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
         prev = Some((ts, rid));
     }
 
-    // RC05：按**会话实际保留的数据**记账——H07 起事件本体不再随会话常驻
-    // （汇总与明细分页都按批流式读取），因此这里计的是行索引、元数据与价格表。
     let query_id = format!("q{namespace}-{qseq}-g{history_generation}");
-    let charge =
-        snapshot_retained_bytes(&collection, &rows, &query_id, &tz_label, &main_fingerprint)
-            .map_err(|e| anyhow!(e))?;
+
+    // H06：日汇总桶选择在这里固定一次——按日筛选/分组且时区与来源时区不同时，
+    // 日汇总不参与（返回可恢复提示），绝不把来源日期当午夜事件重切。
+    // H07：明细桶集合由只读快照**流式**构建（内存随不同桶数增长，不随事件数）。
+    // 2026-11-05（第二轮）：桶统计需要日汇总的覆盖起点（来源快照建立时刻），
+    // 因此直接传入 rollups——起点来自同一份快照，不会与判定用的时间分叉。
+    let day_sensitive = opts.by == crate::aggregate::GroupBy::Day || !time_bounds.is_unbounded();
+    let rollups = read.rollups(opts.agent)?;
+    // 无汇总、仅明细模式或时刻范围都不需要覆盖桶统计：省掉对全部事件的
+    // 日期/模型归一化扫描；原有范围与时区诊断仍由 select 读取 rollups 给出。
+    let needs_detail_buckets = !rollups.is_empty()
+        && opts.rollups != report::RollupsMode::DetailOnly
+        && !matches!(time_bounds, report::TimeBounds::Instant { .. });
+    let buckets = if needs_detail_buckets {
+        report::collect_detail_buckets(&read, opts.agent, &rollups, &collection.pricing)?
+    } else {
+        report::DetailBuckets::new()
+    };
+    let rollup_selection = report::select_rollup_contributions(
+        &buckets,
+        &rollups,
+        day_sensitive,
+        &tz_label,
+        report::RollupBucketPolicy::default(),
+        &time_bounds,
+        opts.rollups,
+        &collection.pricing,
+    )?;
+    // 补修三：日行分组/顺序/游标定位在这里算一次并冻结（不计价）——分页
+    // 不再每页重建，费用只对真正落到当前页的行按需计算。
+    let rollup_drill = report::build_rollup_drill_index(&rollup_selection, &collection.pricing)?;
+
+    // RC05：按**会话实际保留的数据**记账——H07 起事件本体不再随会话常驻
+    // （汇总与明细分页都按批流式读取），因此这里计的是行索引、日行索引、
+    // 元数据与价格表。日行索引的费用单元随行一次性分配，无未记账的懒增长。
+    let charge = snapshot_retained_bytes(
+        &collection,
+        &rows,
+        &rollup_drill,
+        &query_id,
+        &tz_label,
+        &main_fingerprint,
+    )
+    .map_err(|e| anyhow!(e))?;
     let limit = quota_limit();
     if charge > limit {
         // RC05：单会话超预算——明确失败、不截断数据；建议必须真实有效。
@@ -626,33 +677,6 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
     let reservation =
         acquire_with_eviction(charge, opts.trigger.is_auto()).map_err(|e| anyhow!(e))?;
 
-    // H06：日汇总桶选择在这里固定一次——按日筛选/分组且时区与来源时区不同时，
-    // 日汇总不参与（返回可恢复提示），绝不把来源日期当午夜事件重切。
-    // H07：明细桶集合由只读快照**流式**构建（内存随不同桶数增长，不随事件数）。
-    // 2026-11-05（第二轮）：桶统计需要日汇总的覆盖起点（来源快照建立时刻），
-    // 因此直接传入 rollups——起点来自同一份快照，不会与判定用的时间分叉。
-    let day_sensitive = opts.by == crate::aggregate::GroupBy::Day || !time_bounds.is_unbounded();
-    let rollups = read.rollups(opts.agent)?;
-    // 无汇总、仅明细模式或时刻范围都不需要覆盖桶统计：省掉对全部事件的
-    // 日期/模型归一化扫描；原有范围与时区诊断仍由 select 读取 rollups 给出。
-    let needs_detail_buckets = !rollups.is_empty()
-        && opts.rollups != report::RollupsMode::DetailOnly
-        && !matches!(time_bounds, report::TimeBounds::Instant { .. });
-    let buckets = if needs_detail_buckets {
-        report::collect_detail_buckets(&read, opts.agent, &rollups)?
-    } else {
-        report::DetailBuckets::new()
-    };
-    let rollup_selection = report::select_rollup_contributions(
-        &buckets,
-        &rollups,
-        day_sensitive,
-        &tz_label,
-        report::RollupBucketPolicy::default(),
-        &time_bounds,
-        opts.rollups,
-    )?;
-
     let snapshot = Arc::new(QuerySnapshot {
         // RC01：命名空间 + 序号 + generation。跨启动唯一性来自命名空间，
         // generation 仅用于诊断（同参并发采集合并时相同）。
@@ -668,6 +692,7 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
         rows,
         time_bounds,
         rollup_selection,
+        rollup_drill,
         collection,
         read,
         _reservation: reservation,
@@ -749,6 +774,8 @@ pub fn query_events(query_id: &str, filter: &EventFilter) -> Result<report::Even
 }
 
 /// 游标 v2：绑定 query_id、主查询指纹、下钻过滤指纹与快照内行位置。
+/// v0.9.4：行集分两段——事件段 `[0, E)` + 日汇总段 `[E, E+R)`。`kind`/`ridx`
+/// 带 serde 默认值：旧格式游标（无这两字段）仍按事件行定位，逐字节兼容。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PageCursor {
@@ -759,10 +786,31 @@ pub struct PageCursor {
     pub ts: String,
     pub rid: String,
     pub seq: u64,
+    #[serde(default, skip_serializing_if = "CursorKind::is_event")]
+    pub kind: CursorKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ridx: Option<usize>,
+}
+
+/// 游标行段：事件行（默认，兼容旧游标）或日汇总行（v0.9.4）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorKind {
+    #[default]
+    Event,
+    Rollup,
+}
+
+impl CursorKind {
+    fn is_event(&self) -> bool {
+        matches!(self, Self::Event)
+    }
 }
 
 /// 校验游标归属（版本/query_id/主指纹/下钻指纹）并返回其行在快照固定
 /// 行序中的绝对位置。任何不匹配都是显式错误——绝不静默换第一页。
+/// v0.9.4：日汇总游标按合并后汇总行序定位（`ridx` = 段内绝对下标），
+/// 事件游标规则不变。
 pub fn locate_cursor(snapshot: &QuerySnapshot, cursor_str: &str, drill_fp: &str) -> Result<usize> {
     let c: PageCursor =
         serde_json::from_str(cursor_str).map_err(|e| anyhow!("游标格式非法: {e}"))?;
@@ -777,6 +825,17 @@ pub fn locate_cursor(snapshot: &QuerySnapshot, cursor_str: &str, drill_fp: &str)
     }
     if c.dfp != drill_fp {
         return Err(anyhow!("query_expired: 明细筛选已变化，请刷新重试"));
+    }
+    if c.kind == CursorKind::Rollup {
+        let ridx = c
+            .ridx
+            .ok_or_else(|| anyhow!("游标缺少日汇总行位置，请刷新重试"))?;
+        // 补修三：行数取冻结索引——定位游标不重建日行、也不触发计价。
+        let count = snapshot.rollup_drill().len();
+        if ridx >= count {
+            return Err(anyhow!("游标位置在当前查询中不存在，请刷新重试"));
+        }
+        return Ok(snapshot.row_count() + ridx);
     }
     let ts: jiff::Timestamp = c.ts.parse().map_err(|_| anyhow!("游标时间戳非法"))?;
     snapshot

@@ -432,6 +432,40 @@ export interface EventRow {
   cost_usd?: number | null;
   /** Task 6：请求级费用计算明细；null/缺省 = 未收录模型或旧后端 */
   cost_breakdown?: EventCostBreakdown | null;
+  /** v0.9.4：存在 = 本行是 CCS 日汇总行（日粒度，非逐请求事件） */
+  rollup?: RollupRowMeta | null;
+  /** v0.9.4：存在 = 该请求用量已计入当日汇总（聚合不重复计入，明细仍可查看） */
+  covered_by_rollup?: string | null;
+}
+
+/**
+ * v0.9.4：下钻日汇总行元数据（与后端 RollupRowMeta 对齐）——与聚合分组
+ * 同一冻结快照、同一费用函数产出；展示停留在日粒度，不补造时分秒/请求 ID/
+ * 项目归属。费用构成字段与 Group 同义，可构造伪 Group 复用分组费用浮层。
+ */
+export interface RollupRowMeta {
+  /** CCS 统计日（来源时区自然日，"YYYY-MM-DD"） */
+  day: string;
+  source_tz: string;
+  /** 逻辑来源标识（如 "ccs"）——应用列展示为来源名 */
+  source: string;
+  requests: number;
+  /** 可信模型展示名（与聚合行同一规则） */
+  label: string;
+  /** 合并的原始渠道模型 ID（去重排序） */
+  models: string[];
+  cost_usd: number;
+  total_cost_usd?: number | null;
+  source_cost_usd?: number | null;
+  source_cost_state?: "full" | "partial" | "absent" | null;
+  cost_detail: "rollup_only";
+  unknown_pricing: boolean;
+  unknown_reason?: "rollup_only" | null;
+  unknown_tokens: TokenCounts;
+  cost_partially_unknown: boolean;
+  has_estimated_cost: boolean;
+  cache_write_split_estimated: boolean;
+  cache_price_zero_estimated: boolean;
 }
 
 export interface EventList {

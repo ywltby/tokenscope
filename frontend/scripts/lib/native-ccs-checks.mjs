@@ -66,7 +66,8 @@ export function ccsVerdict(name, observed) {
         o.after.rollupRequests === o.before.rollupRequests + 3 &&
         addedTokens(o.before.requestTokens, o.after.requestTokens, [700, 90, 10, 30]) &&
         addedTokens(o.before.rollupTokens, o.after.rollupTokens, [900, 60, 10, 20]) &&
-        o.detailTotal === o.after.requests &&
+        o.detailTotal === o.after.requests + o.rollupDayRows &&
+        o.rollupDayRows === o.after.rollups &&
         o.nativeOverlapRows === 1 &&
         o.ccsOnlyRows === 1;
       break;

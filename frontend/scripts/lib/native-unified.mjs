@@ -129,11 +129,19 @@ export function matchEventDom(events, domEvents) {
   };
   const fmt = (value) => Number(value).toLocaleString("en-US");
   return events.rows.every((row, index) => {
+    // v0.9.4：日汇总行与被覆盖行的时间/应用/模型/项目列渲染与逐请求行不同
+    // （EventTable.vue）：日汇总 = 统计日+「日汇总」标签、CCS、可信名+请求数、
+    // 项目占位「—」；被覆盖请求 = 时刻+「已计入汇总」标签。标签文案与 zh-CN 同源。
+    const m = row.rollup;
     const expected = [
-      row.ts,
-      label[row.agent] ?? row.agent,
-      row.model,
-      row.project.split(/[\\/]/).filter(Boolean).at(-1) ?? row.project,
+      m
+        ? `${row.ts}日汇总`
+        : row.covered_by_rollup
+          ? `${row.ts}已计入汇总`
+          : row.ts,
+      m ? m.source.toUpperCase() : (label[row.agent] ?? row.agent),
+      m ? `${m.label} · ${fmt(m.requests)} 次请求` : row.model,
+      m ? "—" : (row.project.split(/[\\/]/).filter(Boolean).at(-1) ?? row.project),
       fmt(row.input + row.cache_write + row.cache_read),
       fmt(row.output),
       fmt(row.cache_write),

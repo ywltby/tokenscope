@@ -6,8 +6,7 @@ use std::collections::BTreeMap;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
-use crate::model::{AgentKind, TokenCounts, UsageEvent};
-use crate::model_identity::ModelIdentity;
+use crate::model::{AgentKind, TokenCounts, UNKNOWN_PROJECT, UsageEvent};
 use crate::pricing::Pricing;
 
 /// MP04：聚合中间态——分组累计 + 该组原始模型名的稳定代表写法。
@@ -26,7 +25,8 @@ struct GroupAccum {
 /// MP04：Model 维度的展示名——优先可信 models.dev 模型名（按完整等价 ID
 /// 命中且与条目顺序无关），其次该组原始模型名的稳定代表，绝不展示压缩后的
 /// 身份键（`claudeopus55` 这类写法只用于筛选与下钻匹配）。
-fn model_label(key: &str, representative: Option<&str>, pricing: &Pricing) -> String {
+/// v0.9.4：下钻日汇总行复用同一展示名规则（聚合行与汇总行名称一致）。
+pub(crate) fn model_label(key: &str, representative: Option<&str>, pricing: &Pricing) -> String {
     let rep = representative.unwrap_or(key);
     pricing
         .display_name_for(rep)
@@ -365,17 +365,18 @@ impl AggregateState {
     }
 
     /// 该事件是否已计入日汇总（同桶、且不晚于覆盖起点；起点缺失视为整桶覆盖）。
-    fn covered_by_rollup(&self, e: &EventView<'_>) -> bool {
+    /// `identity` = 事件的规范模型身份（v0.9.4：与桶键同一归一规则）。
+    fn covered_by_rollup(&self, e: &EventView<'_>, identity: &str) -> bool {
         let Some(map) = &self.covered else {
             return false;
         };
-        let identity = e.model_identity.to_string();
         for (tz_name, buckets) in map {
             let Ok(tz) = TimeZone::get(tz_name) else {
                 continue;
             };
             let day = e.ts.to_zoned(tz).date().to_string();
-            if let Some(since) = buckets.get(&(day, e.agent.as_str().to_string(), identity.clone()))
+            if let Some(since) =
+                buckets.get(&(day, e.agent.as_str().to_string(), identity.to_string()))
             {
                 return since.is_none_or(|at| e.ts <= at);
             }
@@ -402,13 +403,26 @@ impl AggregateState {
     }
 
     fn push_view(&mut self, e: &EventView<'_>, pricing: &Pricing) -> anyhow::Result<()> {
-        if self.covered_by_rollup(e) {
+        // v0.9.4：分组与覆盖判定共用规范身份（可信价格表确认的渠道别名）；
+        // 其他维度且无覆盖桶时不需要身份，不做多余归一化。
+        let model_key = (self.by == GroupBy::Model || self.covered.is_some())
+            .then(|| pricing.canonical_identity_key(e.model));
+        if let Some(key) = &model_key
+            && self.covered_by_rollup(e, key)
+        {
             return Ok(());
         }
         if !self.agent_seen.contains(&e.agent.as_str()) {
             self.agent_seen.push(e.agent.as_str());
         }
-        push_event_into(&mut self.map, self.by, &self.tz, e, pricing)
+        push_event_into(
+            &mut self.map,
+            self.by,
+            &self.tz,
+            e,
+            pricing,
+            model_key.as_deref(),
+        )
     }
 
     /// 喂入一条日汇总贡献。
@@ -426,7 +440,6 @@ struct EventView<'a> {
     ts: jiff::Timestamp,
     agent: AgentKind,
     model: &'a str,
-    model_identity: std::borrow::Cow<'a, str>,
     project: &'a str,
     tokens: crate::model::TokenCounts,
 }
@@ -437,7 +450,6 @@ impl<'a> EventView<'a> {
             ts: e.ts,
             agent: e.agent,
             model: &e.model,
-            model_identity: std::borrow::Cow::Owned(ModelIdentity::parse(&e.model).identity_key()),
             project: &e.project,
             tokens: crate::model::TokenCounts::from_event(e),
         }
@@ -448,8 +460,7 @@ impl<'a> EventView<'a> {
             ts: e.ts,
             agent: e.app,
             model: &e.model_raw,
-            model_identity: std::borrow::Cow::Borrowed(&e.model_identity),
-            project: e.project_key.as_deref().unwrap_or("(未知)"),
+            project: e.project_key.as_deref().unwrap_or(UNKNOWN_PROJECT),
             tokens: e.tokens,
         }
     }
@@ -462,6 +473,7 @@ fn push_event_into(
     tz: &TimeZone,
     e: &EventView<'_>,
     pricing: &Pricing,
+    model_key: Option<&str>,
 ) -> anyhow::Result<()> {
     // 逐条喂入时不知道最终是否多应用：先如实记录，`finish` 再按需清空
     //（与切片路径“单 agent 报告不填 agents”的输出完全一致）。
@@ -469,7 +481,9 @@ fn push_event_into(
     {
         let key = match by {
             GroupBy::Day => e.ts.to_zoned(tz.clone()).date().to_string(),
-            GroupBy::Model => e.model_identity.to_string(),
+            GroupBy::Model => model_key
+                .expect("Model 维度由 push_view 提供规范身份")
+                .to_string(),
             GroupBy::Project => e.project.to_string(),
             GroupBy::Agent => e.agent.as_str().to_string(),
         };
@@ -563,6 +577,73 @@ fn push_event_into(
     Ok(())
 }
 
+/// v0.9.4：单条采用日汇总贡献的费用构成——聚合（[`push_rollup_into`]）与
+/// 下钻日汇总行共用，保证两个视图金额逐项一致。
+pub(crate) struct RollupCostParts {
+    /// 估算部分金额（来源费用已提供时为 0——同一份用量只选一次依据）。
+    pub cost_usd: f64,
+    /// 实际产生用量且缺价的分项 token（来源费用已提供时为 0）。
+    pub unknown_tokens: TokenCounts,
+    /// 有实际使用中的 token 获得估算覆盖（含零元费率；来源费用不置位）。
+    pub has_estimated_cost: bool,
+    pub cache_write_split_estimated: bool,
+    pub cache_price_zero_estimated: bool,
+}
+
+/// 补修三：日汇总贡献计价的实际调用次数——证明分页只为落到当前页的日行
+/// 计价，且同一快照内复用已算结果（取走即清零，便于逐段断言）。
+static ROLLUP_COST_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 测试专用（#[doc(hidden)]）：取走并清零日汇总计价调用计数。
+#[doc(hidden)]
+pub fn take_rollup_cost_calls_for_tests() -> u64 {
+    ROLLUP_COST_CALLS.swap(0, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// 费用覆盖逐条判定（v0.9.2，2026-11-15 用户更正旧规则）：
+/// 1. 来源费用已提供（Some(v)，含 Some(0)）→ token 不进 unknown，费用走
+///    来源通道，不叠加估算；
+/// 2. 缺失费用 → `estimate_rollup` 按**可证明适用**的费率估算：分段档位
+///    依赖缺失的单请求长度、时段价依赖缺失的请求时刻 → 受影响分项真实
+///    未定价；始终生效的覆盖规则正常应用；完整估算计入金额，部分缺价只把
+///    实际未获覆盖的分项 token 进 unknown；无候选才整体真实未定价；
+/// 3. 不把一天 token 总量当单请求上下文，不默认基础档、不编造请求时刻/
+///    分档/历史价格。来源统计日 + 来源时区用于排除该日不可能的星期规则。
+pub(crate) fn rollup_cost_parts(r: &RollupContribution, pricing: &Pricing) -> RollupCostParts {
+    ROLLUP_COST_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut parts = RollupCostParts {
+        cost_usd: 0.0,
+        unknown_tokens: TokenCounts::default(),
+        has_estimated_cost: false,
+        cache_write_split_estimated: false,
+        cache_price_zero_estimated: false,
+    };
+    if r.source_cost_usd.is_some() {
+        return parts;
+    }
+    let day = r.day.parse::<jiff::civil::Date>().ok();
+    let source_tz = jiff::tz::TimeZone::get(&r.source_tz).ok();
+    let estimate = pricing.estimate_rollup(&r.model, &r.tokens, day, source_tz.as_ref());
+    if estimate
+        .as_ref()
+        .is_some_and(|est| est.covers_used_tokens(&r.tokens))
+    {
+        parts.has_estimated_cost = true;
+    }
+    match estimate {
+        Some(est) => {
+            parts.cost_usd = est.cost;
+            if !est.complete {
+                parts.unknown_tokens = est.unknown;
+            }
+            parts.cache_write_split_estimated = est.cache_write_split_estimated;
+            parts.cache_price_zero_estimated = est.cache_price_zero_estimated;
+        }
+        None => parts.unknown_tokens = r.tokens,
+    }
+    parts
+}
+
 /// 喂入一条日汇总贡献（H06）：只有日粒度的历史不能按请求级重估——
 /// v0.9.2 起**费用覆盖逐条判定**（见函数内注释）：来源费用已提供的汇总
 /// token 不进 unknown；缺失费用按**可证明适用的费率**估算
@@ -579,9 +660,9 @@ fn push_rollup_into(
     {
         let key = match by {
             GroupBy::Day => r.day.clone(),
-            GroupBy::Model => ModelIdentity::parse(&r.model).identity_key(),
+            GroupBy::Model => pricing.canonical_identity_key(&r.model),
             // 日汇总没有 cwd/project：与明细侧同一约定，保持「未知」。
-            GroupBy::Project => "(未知)".to_string(),
+            GroupBy::Project => UNKNOWN_PROJECT.to_string(),
             GroupBy::Agent => r.app.as_str().to_string(),
         };
         let key_err = key.clone();
@@ -611,64 +692,21 @@ fn push_rollup_into(
             .tokens
             .checked_add(&r.tokens)
             .ok_or_else(|| anyhow::anyhow!("分组 {key_err} 的 token 累计超出可表示范围"))?;
-        // v0.9.2（2026-11-15，用户更正旧规则）：**费用覆盖逐条判定**——
-        // 旧实现把每条汇总的全部 token 无条件计入 unknown_tokens 并置
-        // unknown_pricing=true；即使模型已有价格、CCS 已完整提供费用也显示
-        // 大量未定价。rollup_only 只表示数据粒度，不等同缺价：
-        // 1. 来源费用已提供（Some(v)，含 Some(0)）→ 该汇总 token 不进
-        //    unknown，费用走来源通道，不叠加估算（同一份用量只选一次依据）；
-        // 2. 缺失费用 → 用 `estimate_rollup` 按**可证明适用**的费率估算该
-        //    汇总：分段档位依赖缺失的单请求长度、时段价依赖缺失的请求时刻
-        //    → 受影响分项真实未定价；始终生效的覆盖规则正常应用；不受缺失
-        //    条件影响的平价分项照常计价：
-        //    完整估算计入 cost_usd；部分缺价只把实际未获覆盖的分项 token
-        //    （est.unknown）进 unknown；无候选才整体进 unknown（真实未定价）。
-        // 3. 不把一天 token 总量当单请求上下文，不默认基础档、不编造请求
-        //    时刻/分档/历史价格。
-        // 请求数/四桶原始 token/来源选择/导入幂等不受影响。
-        if let Some(_fee) = r.source_cost_usd {
-            // 已提供费用（含显式 0）：token 全覆盖，不进 unknown；来源费用
-            // 是独立通道，不置位估算依据。
-        } else {
-            // 缺失费用：按可证明适用的费率估算（分段档位/时段价依赖缺失的
-            // 请求长度/时刻时，受影响分项保持真实未定价；始终生效的覆盖
-            // 规则正常应用）。来源统计日 + 来源时区用于排除该日不可能的
-            // 星期规则（如周一汇总不采用仅周日生效的折扣）。
-            let day = r.day.parse::<jiff::civil::Date>().ok();
-            let source_tz = jiff::tz::TimeZone::get(&r.source_tz).ok();
-            let estimate = pricing.estimate_rollup(&r.model, &r.tokens, day, source_tz.as_ref());
-            if estimate
-                .as_ref()
-                .is_some_and(|est| est.covers_used_tokens(&r.tokens))
-            {
-                acc.has_estimated_cost = true;
-            }
-            match estimate {
-                Some(est) => {
-                    // 已知分项金额计入主估算；未获覆盖的分项 token 进 unknown
-                    //（est.unknown 只含实际产生 token 且缺价的分项）。
-                    g.cost_usd += est.cost;
-                    if !g.cost_usd.is_finite() {
-                        anyhow::bail!("分组 {key_err} 的费用累计出现非有限值");
-                    }
-                    if !est.complete {
-                        g.unknown_tokens =
-                            g.unknown_tokens.checked_add(&est.unknown).ok_or_else(|| {
-                                anyhow::anyhow!("分组 {key_err} 的未知 token 累计超出可表示范围")
-                            })?;
-                    }
-                    g.cache_write_split_estimated |= est.cache_write_split_estimated;
-                    g.cache_price_zero_estimated |= est.cache_price_zero_estimated;
-                }
-                None => {
-                    // 无候选：全部 token 真实未定价。
-                    g.unknown_tokens =
-                        g.unknown_tokens.checked_add(&r.tokens).ok_or_else(|| {
-                            anyhow::anyhow!("分组 {key_err} 的未知 token 累计超出可表示范围")
-                        })?;
-                }
-            }
+        // v0.9.2（2026-11-15，用户更正旧规则）：费用覆盖逐条判定——规则见
+        // [`rollup_cost_parts`]。聚合与下钻日汇总行共用同一函数，两个视图的
+        // 金额/未知 token/估算标记逐项一致（v0.9.4）。
+        let parts = rollup_cost_parts(r, pricing);
+        acc.has_estimated_cost |= parts.has_estimated_cost;
+        g.cost_usd += parts.cost_usd;
+        if !g.cost_usd.is_finite() {
+            anyhow::bail!("分组 {key_err} 的费用累计出现非有限值");
         }
+        g.unknown_tokens = g
+            .unknown_tokens
+            .checked_add(&parts.unknown_tokens)
+            .ok_or_else(|| anyhow::anyhow!("分组 {key_err} 的未知 token 累计超出可表示范围"))?;
+        g.cache_write_split_estimated |= parts.cache_write_split_estimated;
+        g.cache_price_zero_estimated |= parts.cache_price_zero_estimated;
         // unknown_pricing 只在实际存在未获费用覆盖的 token 时置位；纯明细
         // 的缺价由 push_event_into 置位。这里按本组 unknown 是否增长判定。
         if g.unknown_tokens.total() > 0 {

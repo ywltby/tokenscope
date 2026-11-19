@@ -1,11 +1,19 @@
 <script setup lang="ts">
 import { computed, h, ref } from "vue";
 import { NDataTable, NTag, NTooltip, type DataTableColumn } from "naive-ui";
-import { AGENT_LABEL, fmtNum, projectLabel, type EventList } from "../types";
+import {
+  AGENT_LABEL,
+  fmtNum,
+  projectLabel,
+  type EventList,
+  type Group,
+  type RollupRowMeta,
+} from "../types";
 import { formatMoney } from "../lib/formatMoney";
 import { tokenBucketLabel } from "../lib/tokenDisplay";
 import { totalInput } from "../lib/tokenUsage";
 import CostBreakdownTooltip from "./CostBreakdownTooltip.vue";
+import GroupCostBreakdownTooltip from "./GroupCostBreakdownTooltip.vue";
 import ScrollList from "./ScrollList.vue";
 import { useT } from "../lib/i18n";
 
@@ -45,18 +53,141 @@ function fmtPrice(v: number): string {
   return formatMoney(v, "request");
 }
 
+/// 费用浮层三态事件接线（请求级与日汇总行共用同一套 openKey 状态）。
+function tipHandlers(key: string) {
+  return {
+    "onHover-enter": () => {
+      hoverKey.value = key;
+    },
+    "onHover-leave": () => {
+      hoverKey.value = null;
+    },
+    "onFocus-enter": () => {
+      focusKey.value = key;
+    },
+    "onFocus-leave": () => {
+      focusKey.value = null;
+    },
+    onToggle: () => {
+      pinnedKey.value = pinnedKey.value === key ? null : key;
+    },
+    onEscape: () => closeRowTip(key),
+  };
+}
+
+/// v0.9.4：日汇总行复用分组费用浮层——元数据映射为伪 Group。金额、构成与
+/// 缺失部分由后端同一冻结快照的 rollup_cost_parts 产出，与聚合行同源。
+function rollupGroup(row: EventRowT, m: RollupRowMeta): Group {
+  return {
+    key: row.model,
+    label: m.label,
+    requests: m.requests,
+    tokens: {
+      input: row.input,
+      output: row.output,
+      cache_write: row.cache_write,
+      cache_read: row.cache_read,
+    },
+    cost_usd: m.cost_usd,
+    unknown_pricing: m.unknown_pricing,
+    cache_write_split_estimated: m.cache_write_split_estimated,
+    cache_price_zero_estimated: m.cache_price_zero_estimated,
+    unknown_tokens: m.unknown_tokens,
+    unknown_reason: m.unknown_reason,
+    source_cost_usd: m.source_cost_usd,
+    cost_detail: m.cost_detail,
+    source_cost_state: m.source_cost_state,
+    total_cost_usd: m.total_cost_usd,
+    has_estimated_cost: m.has_estimated_cost,
+    cost_partially_unknown: m.cost_partially_unknown,
+    agents: [],
+  };
+}
+
 const columns = computed<DataTableColumn[]>(() => [
-  { title: t("dashboard.colTime"), key: "ts", className: "ts-num" },
+  {
+    title: t("dashboard.colTime"),
+    key: "ts",
+    className: "ts-num",
+    // v0.9.4：日汇总行只到日粒度（后端 ts 即统计日，不补造时分秒）；
+    // 被汇总覆盖的逐请求行加标记，悬浮说明用量已计入当日汇总。
+    render: (r) => {
+      const row = asRow(r);
+      if (row.rollup) {
+        return h("span", { class: "ts-rollup-time" }, [
+          row.ts,
+          h(
+            NTag,
+            { size: "small", bordered: false, type: "info" },
+            { default: () => t("dashboard.rollupRowTag") },
+          ),
+        ]);
+      }
+      const day = row.covered_by_rollup;
+      if (day) {
+        return h(NTooltip, null, {
+          trigger: () =>
+            h(
+              "span",
+              { class: "ts-rollup-time ts-focusable", style: "cursor: help", tabindex: 0 },
+              [
+                row.ts,
+                h(
+                  NTag,
+                  { size: "small", bordered: false },
+                  { default: () => t("dashboard.rollupCoveredTag") },
+                ),
+              ],
+            ),
+          default: () => t("dashboard.rollupCoveredTip", { day }),
+        });
+      }
+      return row.ts;
+    },
+  },
   {
     title: t("dashboard.colAgent"),
     key: "agent",
-    render: (r) => AGENT_LABEL[asRow(r).agent] ?? asRow(r).agent,
+    render: (r) => {
+      const row = asRow(r);
+      // v0.9.4：日汇总行的应用列 = 逻辑来源名（ccs → CCS）。
+      if (row.rollup) return row.rollup.source.toUpperCase();
+      return AGENT_LABEL[row.agent] ?? row.agent;
+    },
   },
   {
     title: t("dashboard.colModel"),
     key: "model",
     // 设计系统 Task 5：模型名可聚焦获取完整值（不只 hover）
-    render: (r) => h("span", { tabindex: 0, class: "ts-focusable" }, asRow(r).model),
+    render: (r) => {
+      const row = asRow(r);
+      const m = row.rollup;
+      // v0.9.4：日汇总行显示可信展示名 + 真实请求数；悬浮可见合并的
+      // 渠道模型与来源统计时区（同日多渠道汇总合并为一行）。
+      if (m) {
+        return h(
+          NTooltip,
+          { style: "white-space: pre-line" },
+          {
+            trigger: () =>
+              h("span", { tabindex: 0, class: "ts-focusable", style: "cursor: help" }, [
+                m.label,
+                h(
+                  "span",
+                  { class: "ts-rollup-requests" },
+                  ` · ${t("dashboard.rollupRequests", { n: fmtNum(m.requests) })}`,
+                ),
+              ]),
+            default: () =>
+              t("dashboard.rollupModelsTip", {
+                models: m.models.join(", "),
+                tz: m.source_tz,
+              }),
+          },
+        );
+      }
+      return h("span", { tabindex: 0, class: "ts-focusable" }, row.model);
+    },
   },
   {
     title: t("dashboard.colProject"),
@@ -64,7 +195,10 @@ const columns = computed<DataTableColumn[]>(() => [
     // 长项目名允许换行；悬浮/聚焦可见完整路径。
     // C2：明细项目显示末段（身份是完整路径），悬浮可见完整值。
     render: (r) => {
-      const p = asRow(r).project;
+      const row = asRow(r);
+      // v0.9.4：日汇总无项目归属，不补造——显示占位符。
+      if (row.rollup) return "—";
+      const p = row.project;
       const label = projectLabel(p);
       if (label === p) return label;
       return h(NTooltip, null, {
@@ -112,6 +246,19 @@ const columns = computed<DataTableColumn[]>(() => [
       const c = row.cost_usd;
       const bd = row.cost_breakdown;
       const key = row.cursor;
+      const m = row.rollup;
+      // v0.9.4：日汇总行走分组费用浮层（构成/缺失与聚合行同一依据）；
+      // 无费用依据时显示「未知」，仍可打开浮层查看缺项。
+      if (m) {
+        return h(GroupCostBreakdownTooltip, {
+          group: rollupGroup(row, m),
+          displayText: c == null ? t("dashboard.unknownTag") : fmtPrice(c),
+          unknownOnly: c == null,
+          open: openKey.value === key,
+          pinned: pinnedKey.value === key,
+          ...tipHandlers(key),
+        });
+      }
       if (c == null) {
         // 未知价格：明确状态标签，无浮层（不强转 null 成数字）。
         return h(
@@ -124,11 +271,10 @@ const columns = computed<DataTableColumn[]>(() => [
       // 来源"（提取为 CostBreakdownTooltip 组件——可访问交互与真实浮层
       // 测试内聚）；旧/异常响应（有价无明细）保持金额原样不崩溃。
       if (!bd) return h("span", { class: "ts-num" }, fmtPrice(c));
-      const open = openKey.value === key;
       return h(CostBreakdownTooltip, {
         cost: c,
         breakdown: bd,
-        open,
+        open: openKey.value === key,
         // RC06：外部点击只对**固定态**生效，由本层清除 pinnedKey。
         pinned: pinnedKey.value === key,
         // 任务 6：elevated 玻璃浮层——480px 上限 + 16px 模糊 + 12px 圆角
@@ -136,26 +282,7 @@ const columns = computed<DataTableColumn[]>(() => [
         // UX01：盒模型按 border-box 计算，长文本换行；外框宽度受视口约束
         tooltipStyle:
           "box-sizing: border-box; max-width: min(480px, calc(100vw - 32px)); backdrop-filter: var(--ts-glass-blur-popover); -webkit-backdrop-filter: var(--ts-glass-blur-popover); border-radius: var(--ts-radius-popover);",
-        "onHover-enter": () => {
-          hoverKey.value = key;
-        },
-        "onHover-leave": () => {
-          hoverKey.value = null;
-        },
-        "onFocus-enter": () => {
-          focusKey.value = key;
-        },
-        "onFocus-leave": () => {
-          focusKey.value = null;
-        },
-        onToggle: () => {
-          if (pinnedKey.value === key) {
-            pinnedKey.value = null;
-          } else {
-            pinnedKey.value = key;
-          }
-        },
-        onEscape: () => closeRowTip(key),
+        ...tipHandlers(key),
       });
     },
   },
@@ -321,5 +448,20 @@ const rowKey = (r: object): string => asRow(r).cursor;
   padding: var(--ts-space-2) var(--ts-space-3);
   margin: var(--ts-space-1) 0;
   border-radius: var(--ts-radius-control);
+}
+</style>
+
+<style>
+/* v0.9.4：列 render 用 h() 创建的节点不带 SFC scope 属性（与
+   GroupCostBreakdownTooltip 同根因），日汇总行样式用全局作用域 +
+   ts-rollup- 前缀类名隔离。 */
+.ts-rollup-time {
+  display: inline-flex;
+  gap: var(--ts-space-1);
+  align-items: center;
+}
+.ts-rollup-requests {
+  color: var(--ts-text-muted);
+  font-size: 12px;
 }
 </style>

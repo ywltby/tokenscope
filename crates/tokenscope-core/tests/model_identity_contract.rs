@@ -137,7 +137,13 @@ fn model_identity_groups_aliases_across_agents() {
         r.groups
     );
     let g = &r.groups[0];
-    assert_eq!(g.key, "claudeopus55", "key 是等价身份键");
+    // v0.9.4：三种裸拼写经**唯一**可信 models.dev 模型（acme/claude-opus-5.5）
+    // 确认，规范身份键归一到该可信键（含确认渠道前缀），不再是裸结构键
+    // `claudeopus55`。合并语义不变（仍是一行），只是键带上确认的渠道。
+    assert_eq!(
+        g.key, "acme/claudeopus55",
+        "key 是规范身份键（裸别名经唯一可信模型确认归一）"
+    );
     assert_eq!(
         g.label.as_deref(),
         Some("Claude Opus 5.5"),

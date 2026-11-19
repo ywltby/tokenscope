@@ -747,7 +747,7 @@ fn event_from_usage(
     let project = state
         .tracker
         .root()
-        .map_or_else(|| "(未知)".to_string(), str::to_string);
+        .map_or_else(|| crate::model::UNKNOWN_PROJECT.to_string(), str::to_string);
     let event_cwd = state.tracker.cwd().map(str::to_string);
     let session_initial_cwd = state.initial_cwd.clone();
     // 守恒已受检确认 cached + cache_write ≤ input 且 total 可表示：

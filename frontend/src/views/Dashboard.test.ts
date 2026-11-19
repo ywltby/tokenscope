@@ -13,7 +13,7 @@ import Dashboard from "./Dashboard.vue";
 // UX08：样式契约断言需要 SFC 源文本（项目无 @types/node，用 Vite ?raw）
 import dashboardSource from "./Dashboard.vue?raw";
 import TrendChart from "../components/TrendChart.vue";
-import type { Dim, EventList, Group, SummaryReport } from "../types";
+import type { Dim, EventList, EventRow, Group, SummaryReport } from "../types";
 import {
   SNAPSHOT_VERSION,
   resetSnapshotQueueForTests,
@@ -2229,6 +2229,254 @@ describe("Dashboard 自动读取状态（U06）", () => {
     expect(begins.length).toBe(beginsBefore + 1);
     expect(begins.at(-1)![1]).toMatchObject({ collect: true, trigger: "manual" });
     expect(w.findAll("button").some((b) => b.text() === "有新数据 · 刷新")).toBe(false);
+    w.unmount();
+  });
+});
+
+// ── v0.9.4 升级回归：v21 视图快照拒读 ────────────────────────────────
+// v0.9.3 与 v0.9.4 的前端快照格式版本同为 21：升级后 loadViewCache 会把
+// v0.9.3 的聚合与明细当首帧恢复——两行同名 Claude Fable 5.2（跨渠道别名
+// 未合并）与空的 CCS 明细（当时日汇总下钻 0 行）；首次查询失败时旧结果还会
+// 继续作为缓存展示。快照版本升到 22 后 v21 一律忽略，由首次正常查询从现有
+// 历史库重建；筛选偏好与时区独立保存，不受拒读影响。
+const FABLE_LABEL = "Claude Fable 5.2";
+const OPUS_LABEL = "Claude Opus 4.7";
+const CCS_DRILL = { type: "model", key: "claudeopus47", label: OPUS_LABEL };
+
+function labelled(key: string, input: number, label: string, requests: number): Group {
+  return { ...group(key, input), label, requests };
+}
+
+/// v0.9.3 形状：同一模型的两个渠道身份各一行，展示名相同。
+const splitFableReport: SummaryReport = {
+  ...summaryA,
+  by: "model",
+  groups: [
+    labelled("anthropic/claudefable52", 2000, FABLE_LABEL, 2),
+    labelled("claudefable52", 3000, FABLE_LABEL, 3),
+    labelled("claudeopus47", 50000000, OPUS_LABEL, 234),
+  ],
+  totals: group("合计", 50005000),
+};
+
+/// v0.9.4 形状：别名合并后 Fable 只有一行（requests = 两侧之和）。
+const mergedFableReport: SummaryReport = {
+  ...splitFableReport,
+  groups: [
+    labelled("anthropic/claudefable52", 5000, FABLE_LABEL, 5),
+    labelled("claudeopus47", 50000000, OPUS_LABEL, 234),
+  ],
+};
+
+function ccsDayRow(day: string, requests: number, input: number, cost: number): EventRow {
+  return {
+    ts: day,
+    record_id: "",
+    cursor: `rollup|${day}|claudeopus47`,
+    agent: "claude-code",
+    model: "claude-opus-4-7",
+    session_id: "",
+    project: "",
+    input,
+    output: 0,
+    cache_write: 0,
+    cache_read: 0,
+    cost_usd: cost,
+    rollup: {
+      day,
+      source_tz: "Asia/Shanghai",
+      source: "ccs",
+      requests,
+      label: OPUS_LABEL,
+      models: ["claude-opus-4-7"],
+      cost_usd: cost,
+      total_cost_usd: cost,
+      source_cost_usd: null,
+      source_cost_state: "absent",
+      cost_detail: "rollup_only",
+      unknown_pricing: false,
+      unknown_reason: null,
+      unknown_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+      cost_partially_unknown: false,
+      has_estimated_cost: true,
+      cache_write_split_estimated: false,
+      cache_price_zero_estimated: false,
+    },
+  };
+}
+
+/// v0.9.4 的 CCS 模型下钻：两条日汇总行（日降序）。
+const ccsDayEvents: EventList = {
+  ...events,
+  rows: [ccsDayRow("2026-05-29", 11, 100000, 1.25), ccsDayRow("2026-05-28", 223, 50000000, 42.5)],
+  total: 2,
+};
+
+/// v0.9.3 留下的快照：格式版本 21、两行同名 Fable、空的 CCS 明细。
+function v21Payload() {
+  return {
+    v: 21,
+    saved_at: "2026-11-18T00:00:00Z",
+    filters: { by: "model", agent: "claude", preset: null, drill: CCS_DRILL },
+    rollups_mode: "auto",
+    report: splitFableReport,
+    events: { ...events, rows: [], total: 0 },
+  };
+}
+
+/// 偏好与时区都与该快照匹配（时区 = 默认 Asia/Shanghai，report 同值）。
+function useUpgradePreferences(): void {
+  localStorage.setItem(
+    VIEW_FILTERS_KEY,
+    JSON.stringify({
+      by: "model",
+      agent: "claude",
+      preset: null,
+      rollupsMode: "auto",
+      drill: CCS_DRILL,
+    }),
+  );
+}
+
+function fableRows(report: SummaryReport | null): Group[] {
+  return (report?.groups ?? []).filter((g) => g.label === FABLE_LABEL);
+}
+
+describe("Dashboard v0.9.4 升级（v21 视图快照拒读）", () => {
+  it("v21_snapshot_not_restored：偏好与时区都匹配，v21 的两行 Fable 与空 CCS 明细仍不得当首帧", async () => {
+    useUpgradePreferences();
+    let resolveSummary!: (v: SummaryReport) => void;
+    let resolveEvents!: (v: EventList) => void;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(v21Payload());
+      // 挂起首次查询：首屏只可能来自快照。
+      if (cmd === "query_summary") return new Promise((r) => (resolveSummary = r));
+      if (cmd === "query_events") return new Promise((r) => (resolveEvents = r));
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(state(w)["report"], "v21 的两行同名 Fable 不得恢复为首帧").toBeNull();
+    expect(state(w)["events"], "v21 的空 CCS 明细不得恢复").toBeNull();
+    expect(state(w)["stale"]).toBe(false);
+    expect(w.text()).not.toContain("缓存数据");
+    // 独立保存的偏好照常生效：拒读快照不等于丢偏好。
+    expect(state(w)["by"]).toBe("model");
+    expect(state(w)["agent"]).toBe("claude");
+    expect((state(w)["drill"] as { key: string }).key).toBe("claudeopus47");
+    // 首次正常查询落地后才是 v0.9.4 的结果。
+    resolveSummary(mergedFableReport);
+    resolveEvents(ccsDayEvents);
+    await flushPromises();
+    expect(fableRows(state(w)["report"] as SummaryReport).length).toBe(1);
+    expect((state(w)["events"] as EventList).rows.length).toBe(2);
+    w.unmount();
+  });
+
+  it("v21_snapshot_not_shown_on_first_query_failure：首次查询失败只提示刷新失败，不回显旧结果", async () => {
+    useUpgradePreferences();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(v21Payload());
+      if (cmd === "query_summary") return Promise.reject(new Error("net down"));
+      if (cmd === "query_events") return Promise.reject(new Error("net down"));
+      if (cmd === "collection_status") return Promise.resolve(collectionStatusOk());
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    const pill = w.find(".page-head .ts-status-pill");
+    expect(pill.classes()).toContain("ts-pill-warning");
+    expect(pill.text()).toContain("刷新失败");
+    expect(w.text()).toContain("net down");
+    expect(state(w)["report"], "失败时不得回显 v21 的两行 Fable").toBeNull();
+    expect(state(w)["events"], "失败时不得回显 v21 的空 CCS 明细").toBeNull();
+    expect(state(w)["stale"]).toBe(false);
+    expect(w.text()).not.toContain("缓存数据");
+    await snapshotQueueIdle();
+    const saves = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save");
+    expect(saves.length, "失败不落盘").toBe(0);
+    w.unmount();
+  });
+
+  it("upgraded_query_merges_fable_and_shows_ccs_days：新查询合并 Fable、CCS 下钻两条日行，落盘 v22", async () => {
+    useUpgradePreferences();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(v21Payload());
+      if (cmd === "query_summary") return Promise.resolve(mergedFableReport);
+      if (cmd === "query_events") return Promise.resolve(ccsDayEvents);
+      if (cmd === "collection_status") return Promise.resolve(collectionStatusOk());
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    await nextTick();
+    await snapshotQueueIdle();
+    const fable = fableRows(state(w)["report"] as SummaryReport);
+    expect(fable.length, "跨渠道别名合并为一行").toBe(1);
+    expect(fable[0].key).toBe("anthropic/claudefable52");
+    expect(fable[0].requests).toBe(5);
+    const list = state(w)["events"] as EventList;
+    expect(list.rows.map((r) => r.rollup?.day)).toEqual(["2026-05-29", "2026-05-28"]);
+    expect(list.rows.map((r) => r.rollup?.requests)).toEqual([11, 223]);
+    expect(state(w)["stale"]).toBe(false);
+    const saves = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save");
+    const saved = (
+      saves.at(-1)![1] as { value: { v: number; report: SummaryReport; events: EventList } }
+    ).value;
+    expect(saved.v, "新快照必须是 v22").toBe(22);
+    expect(fableRows(saved.report).length).toBe(1);
+    expect(saved.events.rows.length).toBe(2);
+    w.unmount();
+  });
+
+  it("v22_snapshot_still_restores_first_frame：偏好匹配时 v22 可恢复，后台查询成功后由新结果替换", async () => {
+    useUpgradePreferences();
+    const cached = {
+      ...v21Payload(),
+      v: SNAPSHOT_VERSION,
+      report: mergedFableReport,
+      events: ccsDayEvents,
+    };
+    const newer: SummaryReport = {
+      ...mergedFableReport,
+      groups: [
+        labelled("anthropic/claudefable52", 7000, FABLE_LABEL, 7),
+        labelled("claudeopus47", 50000000, OPUS_LABEL, 234),
+      ],
+    };
+    let resolveSummary!: (v: SummaryReport) => void;
+    let resolveEvents!: (v: EventList) => void;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(cached);
+      if (cmd === "query_summary") return new Promise((r) => (resolveSummary = r));
+      if (cmd === "query_events") return new Promise((r) => (resolveEvents = r));
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(state(w)["stale"], "当前版本 + 偏好匹配 → 首帧恢复").toBe(true);
+    expect(w.text()).toContain("缓存数据");
+    expect(fableRows(state(w)["report"] as SummaryReport)[0].requests).toBe(5);
+    expect((state(w)["events"] as EventList).rows.length).toBe(2);
+    resolveSummary(newer);
+    resolveEvents({
+      ...ccsDayEvents,
+      rows: [...ccsDayEvents.rows, ccsDayRow("2026-05-27", 30, 300000, 3.5)],
+      total: 3,
+    });
+    await flushPromises();
+    expect(state(w)["stale"], "新结果落地后过期标记清除").toBe(false);
+    expect(w.text()).not.toContain("缓存数据");
+    expect(fableRows(state(w)["report"] as SummaryReport)[0].requests, "由新结果替换").toBe(7);
+    expect((state(w)["events"] as EventList).rows.length).toBe(3);
     w.unmount();
   });
 });

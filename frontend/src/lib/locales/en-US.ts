@@ -195,6 +195,13 @@ const enUS: AppMessages = {
     colInput: "Input",
     colOutput: "Output",
     unknownTag: "Unknown",
+    // v0.9.4: CCS daily-rollup drilldown rows
+    rollupRowTag: "Daily rollup",
+    rollupRequests: "{n} requests",
+    rollupCoveredTag: "Counted in rollup",
+    rollupCoveredTip:
+      "This request's usage is included in the {day} daily rollup and is not double-counted in totals; the detail remains viewable.",
+    rollupModelsTip: "Merged channel models: {models}\nStatistics timezone: {tz}",
     scrollMore: "Scroll down to load more",
     scrollLoading: "Loading…",
     metricsAria: "Usage metrics",
