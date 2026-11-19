@@ -1,9 +1,11 @@
 # TokenScope 计划与完成状态总账
 
-> 更新日期：2026-11-19。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
+> 更新日期：2026-11-20。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
 > 唯一当前待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)。真实跨午夜、长时间休眠、跨显示器在[独立系统验收待办](system-acceptance-todo.md)维护，均未排期、未标通过。[审计索引](audits/README.md)保留历史时点结论。
 
 ## 现在执行什么
+
+**2026-11-20 v0.9.4 已发布：模型跨渠道别名合并、CCS 日汇总下钻行与快照 v22 升级回归**：[实施计划](active/2026-11-19-v094-model-alias-rollup-drilldown.md)。三个用户可见变化：① 同一模型跨渠道写法（如 `anthropic/claude-fable-5.2` 与 `claude-fable-5-2`）归并为一个分组，表格/图表/下钻共用同一规范身份，请求明细保留原始 ID，已导入数据升级后直接生效（零迁移）；② CCS 日汇总接入下钻——纯汇总模型（如 `claude-opus-4-7`）下钻可见按 CCS 统计日的日粒度行（请求数/四桶/费用与聚合贡献逐项一致），「未知项目」组同样可下钻，被覆盖请求带「已计入日汇总」标记，混合分页游标稳定；③ 升级时忽略 v0.9.3 写下的 v21 视图快照并重建 v22，避免旧快照把已合并的分组/空下钻当首帧恢复。独立复核补修三项（确认别名映射优先于价格目录唯一候选、未知项目下钻纳入日汇总、日行分组与计价索引绑定冻结快照按需计价）与快照 v22 升级回归均红→绿。PR #74 以 `--match-head-commit` 绑定复核 HEAD `74fbf04` 合并为 `9d755e3`，[v0.9.4](https://github.com/ywltby/tokenscope/releases/tag/v0.9.4) 预发布已发布（Release [44560616086](https://github.com/ywltby/tokenscope/actions/runs/44560616086) 19 作业全成功无跳过，含 present/deleted 两条连续升级链与 12 组单跳矩阵；main CI 与 Native UI E2E 同提交全绿），安装包 SHA256 `2bb583c3…3d6a` 下载后重算，与 `SHA256SUMS.txt` 及 GitHub 资产 digest 三方核对一致，`build-metadata.json` 确认 commit/版本（persistent_format 与 v0.9.3 相同）；v0.9.4 已登记升级基线（`select --current-version 0.9.5` 起点含 0.9.4）。
 
 **2026-11-19 v0.9.3 已发布：汇总页费用显示与说明入口收口**：[实施计划](active/2026-11-18-v092-cost-display-consolidation.md)。移除 `†` 与独立未知列，费用完备性改用金额色态（全部未定价橙色「未知」、部分未定价橙色已计价小计、无未定价普通文字色，`lib/costDisplay.ts` 单一来源）；「来源采集统计」与「统计说明」移入「聚合」标题同一说明型浮层（宽 ≤ 480px、内部滚动），表后不再重复。三轮用户独立复核反例全部红→绿：hover/focus 状态隔离（鼠标离开与键盘失焦互不清除）、费用按钮 Enter/Space/点击与行下钻隔离（行处理器只响应行自身激活，金额按钮保留原生一次 click）、焦点不再取消鼠标离开定时器（关闭延迟内聚焦、随后失焦必须关闭）。PR #72 以 `--match-head-commit` 绑定复核 HEAD `33efbb2` 合并为 `bc92783`，[v0.9.3](https://github.com/ywltby/tokenscope/releases/tag/v0.9.3) 预发布已发布（Release 19 作业全成功无跳过，含 present/deleted 两条连续升级链与 12 组单跳矩阵），安装包 SHA256 `874a0021…a4ce` 下载后与 `SHA256SUMS.txt` 及 GitHub 资产 digest 三方核对一致，`build-metadata.json` 确认 commit/版本（persistent_format 与 v0.9.2 相同）；v0.9.3 已登记升级基线（`select --current-version 0.9.4` 起点含 0.9.3）。
 

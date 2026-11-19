@@ -266,8 +266,8 @@ i18n 键 parity、`chartData` 单行断言；真实浏览器走查（qa-artifact
 - [x] Rust 全量（`scripts/run_rust_tests.py`）、前端 typecheck/format/
       test/build、真实浏览器回归通过。
 - [x] 口径与本计划更新；版本 0.9.4。
-- [ ] 正常钩子提交 → 推送 → PR → 最新 HEAD 必需 CI 绿。
-- [ ] 汇报修复前后行数、对账结果、PR 与 HEAD；**停在可审查状态**
+- [x] 正常钩子提交 → 推送 → PR → 最新 HEAD 必需 CI 绿。
+- [x] 汇报修复前后行数、对账结果、PR 与 HEAD；**停在可审查状态**
       （合并、发布、本机安装另行授权）。
 
 ## 7. 交付状态
@@ -320,7 +320,28 @@ i18n 键 parity、`chartData` 单行断言；真实浏览器走查（qa-artifact
 - 本回填提交仅改文档；推送后必需 CI 以 PR 最新 HEAD 实跑为准，结论在最终汇报贴出。
 - 停在可审查状态：不合并、不发布、不安装（另行授权）。
 
-### 7.4 未验证项
+### 7.5 合并、发布与登记（2026-11-20 回填）
+
+- PR [#74](https://github.com/ywltby/tokenscope/pull/74) 以 `--match-head-commit`
+  绑定复核 HEAD `74fbf04` 用 merge commit 合并为
+  **`9d755e3d68e21795271eb903bd221046a4abe7a5`**（合并前复核：目标 main、
+  mergeStateStatus CLEAN、20 项必需检查全过；`bump_version.py --check
+  --base-ref origin/main` = 0.9.4 / patch / release: true）。
+- [Release](https://github.com/ywltby/tokenscope/actions/runs/44560616086)
+  于合并提交 **19 个作业全成功无跳过**：build、install-test、plan-upgrades、
+  present/deleted 两条连续升级链、12 组单跳升级矩阵、publish 全部 success；
+  main [CI](https://github.com/ywltby/tokenscope/actions/runs/44560616258) 与
+  [Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/44560616169)
+  均成功。
+- [v0.9.4](https://github.com/ywltby/tokenscope/releases/tag/v0.9.4) 已公开为
+  预发布；标签直接解引用合并提交 `9d755e3`；四项资产齐全，安装包
+  SHA256 `2bb583c3…3d6a` 下载后重算，与 `SHA256SUMS.txt` 及 GitHub 资产
+  digest 三方核对一致，`build-metadata.json` 确认 commit/版本
+  （persistent_format 与 v0.9.3 相同）。
+- v0.9.4 已登记升级基线（`select --current-version 0.9.5` 起点含 0.9.4）。
+  §8 / §9 各阶段「合并、发布未执行」均为当时（2026-11-19）状态，最终结果以本节为准。
+
+### 7.6 未验证项（合并发布前记录）
 
 - 合并、发布、本机安装：**未执行**（另行授权）。
 - 真实 `~/.tokenscope` / history.db / CCS 数据：未触碰（全部合成夹具+临时目录）。
