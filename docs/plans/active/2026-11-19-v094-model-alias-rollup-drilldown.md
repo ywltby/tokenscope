@@ -301,7 +301,24 @@ i18n 键 parity、`chartData` 单行断言；真实浏览器走查（qa-artifact
 
 ### 7.3 提交 / PR / CI
 
-（回填：提交 sha、PR 编号、最新 HEAD 必需 CI 结论。）
+- 提交链（均经正常 pre-commit 全量钩子，无 `--no-verify`）：
+  `ee589ed`（主修复：模型跨渠道身份归一 + CCS 日汇总下钻行）→
+  `621ef42`（原生身份契约改用规范模型键）→
+  `e963c3b`（原生 DOM 与并集判定纳入日汇总下钻行）→ 本回填提交（仅文档）。
+- PR：[#74](https://github.com/ywltby/tokenscope/pull/74)
+  （`fix/v094-model-identity-rollup-drilldown` → `main`）。
+- 必需 CI 于 `e963c3b` 全绿：
+  [CI](https://github.com/ywltby/tokenscope/actions/runs/44473976522)
+  rust 5m57s / rust-acceptance 6m16s / frontend 6m48s / contracts 9m6s / gate；
+  [Install test](https://github.com/ywltby/tokenscope/actions/runs/44473976489)
+  install-test 12m9s / plan-upgrades / 12 组单跳升级矩阵；
+  [Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/44473976487)
+  native-ui 12m7s。native-ui 首跑在 AC10 因 runner WebView2 SmartScreen
+  临时文件走查竞态（ENOENT，与本批改动无关）失败一次，
+  `gh run rerun --failed` 后全绿；本机同脚本复跑 ui-identity 22/22、
+  ui-ccs-import 18/18、ui-pricing 19/19、privacy-preseeded 15/15。
+- 本回填提交仅改文档；推送后必需 CI 以 PR 最新 HEAD 实跑为准，结论在最终汇报贴出。
+- 停在可审查状态：不合并、不发布、不安装（另行授权）。
 
 ### 7.4 未验证项
 
