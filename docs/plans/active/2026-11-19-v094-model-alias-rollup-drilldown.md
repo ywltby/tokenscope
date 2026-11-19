@@ -459,7 +459,23 @@ $806.68，下钻却只回 1 条原生请求（`qa-artifacts/v094-review/red-brow
 
 #### 8.4.3 提交 / PR / CI
 
-（回填：本批提交 sha、推送后 PR #74 最新 HEAD 的必需 CI 结论。）
+- 提交链（均经正常 pre-commit 全量钩子，无 `--no-verify`）：
+  `d7acef8`（三项补修 + 红-first 回归 + 口径/计划回填 + 浏览器契约扩展）→
+  `35f0314`（浏览器夹具 Fable 规范键对齐确认别名映射）。
+- PR：[#74](https://github.com/ywltby/tokenscope/pull/74)
+  （`fix/v094-model-identity-rollup-drilldown` → `main`），推送后最新 HEAD
+  = **`35f0314`**（基线 `eaefbf4` 之上两个提交）。
+- 必需 CI 于 `35f0314` **全绿**（三个 workflow 的 headSha 均为 `35f0314`）：
+  [CI](https://github.com/ywltby/tokenscope/actions/runs/44501987650)
+          rust 6m8s / rust-acceptance 6m10s / frontend 6m58s / contracts 10m26s / gate 2s；
+  [Install test](https://github.com/ywltby/tokenscope/actions/runs/44501987797)
+  install-test 12m26s / plan-upgrades 10s / 12 组单跳升级矩阵
+  （0.1.0、0.4.0、0.5.9、0.5.13、0.6.0、0.9.3 × present/deleted）全 pass，
+  upgrade-chain 按规则 skipped；
+  [Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/44501987767)
+  native-ui 11m29s（本批一次通过，无重跑）。
+- 本回填提交仅改文档；推送后必需 CI 以 PR 最新 HEAD 实跑为准，结论在最终汇报贴出。
+- 停在可审查状态：不合并、不发布、不安装（另行授权）。
 
 #### 8.4.4 未验证项
 
