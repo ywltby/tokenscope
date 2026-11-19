@@ -919,6 +919,34 @@ describe("useUsageQuery 快照首帧（U04）", () => {
     expect(useTimezone().tz.value, "快照绝不改写时区").toBe("UTC");
     w.unmount();
   });
+
+  it("v21_snapshot_ignored_after_upgrade：v0.9.3 快照（v21）偏好与时区都匹配也不恢复", async () => {
+    // v0.9.4 的跨渠道别名合并与 CCS 日汇总下钻改变了聚合与明细读数，而
+    // v0.9.3 写下的快照格式版本同为 21——必须整体拒读，由首次正常查询从
+    // 现有历史库重建；筛选偏好与时区独立保存，不受拒读影响。
+    const filters = {
+      by: "model",
+      agent: "claude",
+      preset: null,
+      drill: { type: "model", key: "m1" },
+    };
+    localStorage.setItem(VIEW_FILTERS_KEY, JSON.stringify({ ...filters, rollupsMode: "auto" }));
+    okMock({
+      view_cache_load: () => Promise.resolve({ ...snapshotPayload(reportA, filters), v: 21 }),
+      query_summary: () => new Promise<SummaryReport>(() => {}), // 首次查询挂起
+      query_events: () => new Promise<EventList>(() => {}),
+    });
+    const w = mountHost();
+    await flushPromises();
+    expect(api.report.value, "v21 快照不得当首帧").toBeNull();
+    expect(api.events.value, "v21 明细同样不得恢复").toBeNull();
+    expect(api.stale.value).toBe(false);
+    expect(api.by.value, "偏好独立保存，拒读快照不丢偏好").toBe("model");
+    expect(api.agent.value).toBe("claude");
+    expect(api.drill.value?.key).toBe("m1");
+    expect(useTimezone().tz.value, "时区设置不受影响").toBe("Asia/Shanghai");
+    w.unmount();
+  });
 });
 
 describe("useUsageQuery 通知合并（U04）", () => {

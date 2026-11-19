@@ -483,3 +483,100 @@ $806.68，下钻却只回 1 条原生请求（`qa-artifacts/v094-review/red-brow
 - 真实 `~/.tokenscope` / history.db / CCS 数据：未触碰（全部合成夹具 + 临时目录）。
 - 已导入历史无需重导：补修一/二/三都在查询侧生效（别名映射与下钻判定随查询
   快照推导，索引每次建快照时重建），升级后直接生效。
+
+## 9. 升级回归补修：视图快照 v21 → v22（2026-11-19，基线 `fe67e31`，发行版本沿用 0.9.4）
+
+独立复核指出：v0.9.3 与本 PR 的前端 `SNAPSHOT_VERSION` **都是 21**，
+`useUsageQuery.loadViewCache` 的版本校验因此区分不出升级前后的快照。
+本轮只处理旧界面快照，不动已复核通过的合并 / 下钻 / 按需计价。
+
+### 9.1 根因与修法
+
+- 根因：首帧恢复的唯一门槛是 `cached.v !== SNAPSHOT_VERSION`
+  （`useUsageQuery.ts` `loadViewCache`）+ 筛选偏好逐项相等 +
+  `report.timezone === resolvedTzId(tz)`。别名合并与 CCS 日行改变了快照里的
+  **分组行数、下钻 key 与明细行数**，但格式版本号没动 → v0.9.3 写下的 v21
+  快照在升级后仍被当首帧恢复：
+  - 首次查询成功前：可能继续显示**两行同名 Claude Fable 5.2**，或 CCS 模型
+    下钻显示**空明细**（旧版纯日汇总模型下钻 0 行）；
+  - 首次查询失败时：旧结果继续作为 stale 缓存回显，掩盖「刷新失败」。
+- 修法（产品代码只改一处）：`frontend/src/lib/viewSnapshot.ts`
+  `SNAPSHOT_VERSION` **21 → 22**，沿用既有版本校验；v21 快照读取时被忽略，
+  由首次正常查询从现有历史库生成 v22 快照。版本注释写明 v22 的语义
+  （跨渠道别名合并 + CCS 日汇总下钻行）与「v0.9.3 写下的快照同为 v21，
+  只能靠格式版本而非发行版本区分」。
+- 不动的部分：筛选偏好独立存于 localStorage `tokenscope-view-filters`，
+  时区权威在 settings.toml（`initTimezone` / `useTimezone`）——拒读快照
+  既不重写偏好也不重写时区。后端 `view_cache_load` / `view_cache_save`
+  原样存取 JSON、不做版本校验，无需改动；浏览器契约夹具从不提供视图缓存
+  （`cfg.viewCache ?? null`），不受本次递增影响。
+- **发行版本仍是 0.9.4**：同一 PR 内的补修，不再 `bump_version.py`。
+
+### 9.2 红-first 反例（隔离夹具，修复前实跑）
+
+夹具：`view_cache_load` 返回 `v: 21` 快照，report 含两组
+（`anthropic/claudefable52` 2000 输入 / `claudefable52` 3000 输入，
+**label 同为 Claude Fable 5.2**）+ Opus 组，明细 `rows: []`（旧版 CCS 下钻空）；
+localStorage 偏好 `{by: model, agent: claude, preset: null, rollupsMode: auto,
+drill: {type: model, key: claudeopus47}}` 与快照 filters 逐项相等，
+时区同为默认 `Asia/Shanghai` → 旧实现三道门槛全部放行。
+`query_summary` / `query_events` 用挂起的 Promise 冻结首次查询。
+
+| 用例（新增） | 修复前（`SNAPSHOT_VERSION = 21`） | 修复后（22） |
+| --- | --- | --- |
+| `Dashboard.test.ts` `v21_snapshot_not_restored` | **FAIL**：`api.report` 非 null，groups 里两行 label 同为 Claude Fable 5.2；明细为空 CCS 下钻 | PASS：report/events 均 null、`stale=false`、无「缓存数据」标记；偏好 by/agent/drill.key 与时区不受影响 |
+| `Dashboard.test.ts` `v21_snapshot_not_shown_on_first_query_failure` | **FAIL**：两条查询 reject 后仍回显旧 report/events（stale 缓存） | PASS：`.page-head .ts-status-pill.ts-pill-warning` 显示「刷新失败」+ 原因 `net down`，report/events null、无「缓存数据」、0 次 `view_cache_save` |
+| `Dashboard.test.ts` `upgraded_query_merges_fable_and_shows_ccs_days` | **FAIL**：落盘快照 `v = 21` | PASS：放行新查询后 Fable **1 行**（key `anthropic/claudefable52`、requests 5）、CCS 下钻 **2 条日行**（2026-05-29 / 11 请求、2026-05-28 / 223 请求）、`stale=false`，最后一次保存 `v = 22` 且 report/events 为新结果 |
+| `useUsageQuery.test.ts` `v21_snapshot_ignored_after_upgrade` | **FAIL**：偏好与时区都匹配的 v21 快照被当首帧 | PASS：report/events null、stale false，`by=model` / `agent=claude` / `drill.key=m1` / `tz=Asia/Shanghai` 全部保留 |
+| `viewSnapshot.test.ts` 版本断言 | **FAIL**：`expected 21 to be 22` | PASS：`SNAPSHOT_VERSION === 22` |
+
+红：`RED_EXIT=1`，**3 文件 / 5 failed + 117 passed（122）**。
+失败信息即用户描述的反例：`v21 的两行同名 Fable 不得恢复为首帧:
+expected { query_id: 'q-test-a', …(8) } to be null`（received groups 键为
+`anthropic/claudefable52` 与 `claudefable52`，label 均 Claude Fable 5.2）。
+
+### 9.3 v22 正常首屏缓存仍可用（第 3 项验收）
+
+`Dashboard.test.ts` `v22_snapshot_still_restores_first_frame`：缓存换成
+`v: SNAPSHOT_VERSION`（22）+ 合并后的 Fable 单行 + 2 条 CCS 日行，
+首次查询仍挂起 → `stale=true`、显示「缓存数据」、Fable requests 5、明细 2 行；
+放行更晚的查询（Fable requests 7、明细 3 行）→ `stale=false`、「缓存数据」消失、
+requests 7 / 3 行由新结果替换。该用例在修复前后都通过（用相对
+`SNAPSHOT_VERSION` 构造），证明递增只拒旧格式、不破坏正常缓存体验。
+既有 `Dashboard.rollups.test.ts` 的旧版快照用例用 `SNAPSHOT_VERSION - 1`
+构造、保存断言用 `SNAPSHOT_VERSION`，随递增自动保持有效，无需改动。
+
+### 9.4 回归与门禁
+
+- 定向（`vitest run` 四文件：Dashboard / Dashboard.rollups / useUsageQuery /
+  viewSnapshot）：**GREEN_EXIT=0，4 文件 / 129 例 passed**（红 122 + rollups 7）。
+- 前端门禁链（`qa-artifacts/v094-snapshot-upgrade/gate.log`）：**GATE_EXIT=0**
+  —— typecheck ✓ → format:check ✓ → vitest 全量 **81 文件 / 1185 例 passed**
+  （较上一批 1180 增 5：Dashboard 4 + useUsageQuery 1；viewSnapshot 版本断言
+  为改写）→ build ✓（1.99s）→ 官方 `pnpm --dir frontend test:e2e`
+  **test:e2e_EXIT=0**：13 个具名契约全绿（含 `rollup_drilldown_rows`
+  **19 条断言**），normal 四组 light/dark × 1280x820/980x620 与 baseline
+  4 场景均 PASS、**0 契约违例**、0 console error。
+- 首轮门禁在 format:check 失败（新增测试里 `ccsDayEvents.rows` 数组换行不符
+  Prettier），`prettier --write` 后复跑全链绿；改动仅限本轮新增代码。
+- 浏览器契约夹具从不提供视图缓存（`view_cache_load` → `cfg.viewCache ?? null`，
+  无契约设置该字段），故本次递增不改浏览器行为；升级路径由**挂载真实
+  `Dashboard.vue`** 的组件级回归覆盖（invoke 为隔离夹具）。
+- 本轮无 Rust 改动（产品代码只改一个前端常量），Rust 门禁由 PR 必需 CI 覆盖。
+- 证据日志：`qa-artifacts/v094-snapshot-upgrade/{red,green}-targeted.log`
+  与 `gate.log`（gitignored，不入库）。
+
+### 9.5 提交 / PR / CI（回填）
+
+- 提交链（正常 pre-commit 钩子，无 `--no-verify`）：（回填）
+- PR [#74](https://github.com/ywltby/tokenscope/pull/74) 最新 HEAD：（回填）
+- 必需 CI：（回填）
+- 停在可审查状态：不合并、不发布、不安装（另行授权）。
+
+### 9.6 未验证项
+
+- 合并、发布、本机安装：**未执行**（另行授权）。
+- 真实 `~/.tokenscope` / history.db / CCS 数据：未触碰；升级全过程用隔离夹具，
+  无需清库或重导 CCS。
+- 真机「装着 v0.9.3 的旧快照升级」路径未在本机跑（不安装正式包）；
+  由 v21 夹具 + 版本门槛的定向回归覆盖。
