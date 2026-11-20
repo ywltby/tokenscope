@@ -8,7 +8,16 @@
 //  - 底槽用局部 border-box 达到外高 32px（修复前 32 + 上下 padding = 36）；
 //  - 观察容器/选项尺寸变化与选项增删，批量 nextTick 重定位 thumb，卸载断开；
 //  - 外部改变 modelValue 只重定位 thumb，不抢焦点。
-import { nextTick, onBeforeUnmount, onMounted, ref, useSlots, watch } from "vue";
+import {
+  nextTick,
+  onActivated,
+  onBeforeUnmount,
+  onDeactivated,
+  onMounted,
+  ref,
+  useSlots,
+  watch,
+} from "vue";
 import AgentIcon from "./AgentIcon.vue";
 
 export interface SegmentOption<T extends string> {
@@ -37,42 +46,83 @@ defineSlots<{
   icon?: (props: { option: SegmentOption<T>; index: number }) => unknown;
 }>();
 const containerRef = ref<HTMLDivElement | null>(null);
-const thumbStyle = ref({ width: "0px", transform: "translateX(0px)" });
+const thumbStyle = ref({ width: "0px", height: "0px", top: "0px", transform: "translateX(0px)" });
+const thumbReady = ref(false);
+const thumbAnimating = ref(false);
+let measuredValue: T | null = null;
+
+function releaseThumb(): void {
+  thumbReady.value = false;
+  thumbAnimating.value = false;
+}
 
 function items(): HTMLButtonElement[] {
   const c = containerRef.value;
   return c ? Array.from(c.querySelectorAll<HTMLButtonElement>(".ts-segmented-item")) : [];
 }
 
-function updateThumb(): void {
+function updateThumb(animateSelection = false): void {
   const container = containerRef.value;
   if (!container) return;
   const activeIndex = props.options.findIndex((o) => o.value === props.modelValue);
   const activeItem = activeIndex === -1 ? undefined : items()[activeIndex];
   if (!activeItem) {
-    thumbStyle.value = { width: "0px", transform: "translateX(0px)" };
+    releaseThumb();
     return;
   }
   const containerRect = container.getBoundingClientRect();
   const itemRect = activeItem.getBoundingClientRect();
-  thumbStyle.value = {
+  if (
+    containerRect.width <= 0 ||
+    containerRect.height <= 0 ||
+    itemRect.width <= 0 ||
+    itemRect.height <= 0 ||
+    ![
+      containerRect.left,
+      containerRect.top,
+      containerRect.width,
+      containerRect.height,
+      itemRect.left,
+      itemRect.top,
+      itemRect.width,
+      itemRect.height,
+    ].every(Number.isFinite)
+  ) {
+    releaseThumb();
+    return;
+  }
+  // absolute 原点在容器描边内侧；不能把 clientLeft/clientTop 重复计入位移。
+  const next = {
     width: `${itemRect.width}px`,
-    transform: `translateX(${itemRect.left - containerRect.left}px)`,
+    height: `${itemRect.height}px`,
+    top: `${itemRect.top - containerRect.top - container.clientTop + container.scrollTop}px`,
+    transform: `translateX(${itemRect.left - containerRect.left - container.clientLeft + container.scrollLeft}px)`,
   };
+  const changedValue = measuredValue !== props.modelValue;
+  if (
+    thumbReady.value &&
+    !changedValue &&
+    Object.entries(next).every(([k, v]) => thumbStyle.value[k as keyof typeof next] === v)
+  )
+    return;
+  // 相同尺寸的 observer 回调不打断正在发生的真实选择动画；有效布局变化
+  // 则立即对齐。首次/隐藏恢复时由按钮材质切到已对齐 thumb，绝不从 0px 展开。
+  thumbAnimating.value = animateSelection && thumbReady.value && changedValue;
+  thumbStyle.value = next;
+  measuredValue = props.modelValue;
+  thumbReady.value = true;
 }
 
 /// 方向键更新选中值后聚焦对应按钮（UX02：焦点必须真实移动）。
 function selectAndFocus(value: T, index: number): void {
   emit("update:modelValue", value);
   void nextTick(() => {
-    updateThumb();
     items()[index]?.focus();
   });
 }
 
 function select(value: T): void {
   emit("update:modelValue", value);
-  void nextTick(updateThumb);
 }
 
 function onKeydown(e: KeyboardEvent): void {
@@ -94,29 +144,52 @@ function onKeydown(e: KeyboardEvent): void {
 // 外部改变选中值：只重定位 thumb，不抢焦点（区别于方向键路径）。
 watch(
   () => props.modelValue,
-  () => void nextTick(updateThumb),
+  () => updateThumb(true),
+  { flush: "post" },
 );
 // 选项增删/文案变化：下一帧重定位（批处理，避免逐项重排）。
 watch(
   () => props.options,
-  () => void nextTick(updateThumb),
-  { deep: false },
+  () => {
+    observeItems();
+    updateThumb();
+  },
+  { deep: true, flush: "post" },
 );
 
 let observer: ResizeObserver | null = null;
+const observedItems = new Set<HTMLButtonElement>();
+function observeItems(): void {
+  if (!observer) return;
+  const current = new Set(items());
+  for (const item of observedItems)
+    if (!current.has(item)) {
+      observer.unobserve(item);
+      observedItems.delete(item);
+    }
+  for (const item of current)
+    if (!observedItems.has(item)) {
+      observer.observe(item);
+      observedItems.add(item);
+    }
+}
 onMounted(() => {
-  void nextTick(updateThumb);
+  void nextTick(() => updateThumb());
   // 观察容器与每个选项：选中项尺寸/选项增删都会重定位 thumb。
-  observer = new ResizeObserver(() => void nextTick(updateThumb));
+  observer = new ResizeObserver(() => void nextTick(() => updateThumb()));
   if (containerRef.value) {
     observer.observe(containerRef.value);
-    for (const item of items()) observer.observe(item);
+    observeItems();
   }
 });
+
+onDeactivated(releaseThumb);
+onActivated(() => void nextTick(() => updateThumb()));
 
 onBeforeUnmount(() => {
   observer?.disconnect();
   observer = null;
+  observedItems.clear();
 });
 </script>
 
@@ -124,11 +197,12 @@ onBeforeUnmount(() => {
   <div
     ref="containerRef"
     class="ts-segmented"
+    :class="{ 'is-thumb-ready': thumbReady, 'is-thumb-animating': thumbAnimating }"
     role="radiogroup"
     :aria-label="ariaLabel"
     @keydown="onKeydown"
   >
-    <span class="ts-segmented-thumb" :style="thumbStyle" />
+    <span class="ts-segmented-thumb" :style="thumbStyle" aria-hidden="true" />
     <button
       v-for="(opt, i) in options"
       :key="opt.value"
