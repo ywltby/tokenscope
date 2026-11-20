@@ -37,7 +37,8 @@ function orderGroups(groups: Group[], by: string): Group[] {
 export function buildBarChartData(groups: Group[], by: string): BarChartData {
   const ordered = orderGroups(groups, by);
   return {
-    // C2：项目维度分类显示用展示名（末段），完整路径经 key 保留。
+    // 每个后端分组直接绘制一个类别，不在图表层按名字再分组。展示名可重复；
+    // 统计分组键由 Rust 同时交给表格与图表。
     categories: ordered.map((g) => g.label ?? g.key),
     // 2026-10-10 用户修订：图表与英雄栏统一用**互斥四桶**——「输入」= 未缓存
     // 输入（不含缓存写入/缓存命中），四类相加 = 总 token，不重复计数。

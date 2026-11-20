@@ -137,10 +137,17 @@ function formulaRows(lines: CostLine[]): BreakdownRow[] {
   });
 }
 
+/** 以实际用量的费用依据判定，而非候选是否存在或已计价小计是否为零。 */
+export function isRequestFullyUnpriced(lines: CostLine[]): boolean {
+  return (
+    lines.some((l) => l.tokens > 0 && !l.priced) && !lines.some((l) => l.tokens > 0 && l.priced)
+  );
+}
+
 function resultRows(bd: EventCostBreakdown): BreakdownRow[] {
   const rows: BreakdownRow[] = [];
   const unpriced = bd.lines.filter((l) => !l.priced && l.tokens > 0);
-  if (bd.cost_usd === 0 && !bd.complete && unpriced.length > 0) {
+  if (isRequestFullyUnpriced(bd.lines)) {
     // 完全未知：不得显示 $0.00
     rows.push({
       label: t("cost.result"),

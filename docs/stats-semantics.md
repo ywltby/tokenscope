@@ -449,18 +449,21 @@ v7 后新格式以强身份天然去重；弱记录（旧格式）沿用保守�
   主查询指纹、下钻过滤指纹与快照内唯一行位置。版本不符（含 v1 旧
   游标）、会话不存在/被淘汰/进程重启、query_id 或指纹不匹配、行
   位置不存在 → 一律**结构化拒绝**（`query_expired` / 游标非法），
-  允许刷新重建，绝不静默换第一页或新采集结果。
+  允许刷新重建，绝不静默换第一页或新采集结果。`dfp` 的模型分量与
+  模型筛选共用冻结的统计分组键（v0.9.7），确认别名之间可续页；不同模型、
+  项目或日期筛选不能借用同一游标。
 - **混合行位置空间（v0.9.4）**：下钻行集分两段——事件段 `[0, E)`
   （`E = 快照事件行数`，沿用绝对行序）+ 日汇总段 `[E, E + R)`
-  （`R = 当前筛选下被采用汇总合并出的日行数`，见 §5.2）。`total = E + R`。
+  （`R = 主查询中被采用汇总合并出的日行数`，下钻可再筛选，见 §5.2）。
+  无下钻时 `total = E + R`，有下钻时 `total` 为两段中全部匹配的行数。
   游标 v2 向后兼容扩展两个**带 serde 默认值**的可选字段：
   `kind`（缺省 `"event"`）与 `ridx`（缺省 `None`）。事件游标缺省这两
-  字段，线格式与 v0.9.3 **逐字节一致**，旧游标升级后仍可定位事件行；
+  字段，缺字段的兼容格式在同一有效会话中仍可定位事件行；
   日汇总行游标 `kind = "rollup"`、`ridx = i`（段内绝对下标，ts/rid/seq
-  置空占位）。`locate_cursor` 对 `kind = rollup` 校验 `ridx < R` 后返回
+  为来源统计日 / 空串 / 0）。`locate_cursor` 对 `kind = rollup` 校验 `ridx < R` 后返回
   `E + ridx`；归属校验（qid/mfp/dfp）不变。`dfp` 已绑定下钻筛选 →
   同一 `dfp` 下 `R` 确定，续页不漏行、不重复行、顺序稳定（日降序 →
-  规范模型键升序）。`ridx` 越界同样结构化拒绝。
+  模型统计分组键升序）。`ridx` 越界同样结构化拒绝。
   **补修三（v0.9.4）**：`R` 与日行顺序取自建快照时冻结的
   `report::RollupDrillIndex`（分组只算一次，分页共享）——`locate_cursor`
   只读索引行数，不重建日行、也不触发计价；每行费用按需填充并在会话内
@@ -674,69 +677,31 @@ v7 后新格式以强身份天然去重；弱记录（旧格式）沿用保守�
   OpenRouter）> 完整匹配 > 前缀更长（按等价键长度）> 原始键打破。禁止从
   不同候选拼单价；breakdown 的 `match_mode` 与 `candidate_count` 记录匹配
   方式与候选数。
-- **模型身份分组与展示名（2026-10-10）**：按模型图表与聚合列表使用**等价
-  身份键**分组（`Group.key`）——同一模型的多种写法合并为一行，跨应用也合并；
-  不同版本（日期后缀）、不同变体（`:free` / `:thinking`）与无分隔符的相似名
-  保持独立身份：即使它们前缀回退命中同一价格，也不合并用量。展示名
-  （`Group.label`）优先取该等价 ID 命中的**可信 models.dev 模型名**（模型级
-  `name`；provider 名不作兜底，v1–v3 旧快照的名称在加载时清空），否则退回该
-  组原始模型名的稳定代表写法（绝不展示压缩键）；同名不同 ID 不合并。下钻按
-  同一身份规则匹配（传身份键或原始写法都能命中），请求明细仍展示原始模型名；
-  每个请求按自身时间/分段/原始名称计价，分组费用是这些请求费用之和。
-- **跨渠道别名归一（v0.9.4，规范身份）**：等价身份键保留 `/` 渠道结构
-  （`anthropic/claudefable52` 与裸 `claudefable52` 结构上不同），而展示名按
-  **末段**查 models.dev——两侧可能命中同一条目、标签相同却身份不同，导致
-  同一模型被拆成多行；覆盖桶若按结构键分桶，原生请求（裸名）与 CCS 汇总
-  （渠道前缀写法）会落入不同桶，汇总桶被误判「无明细」整桶采用、原生明细
-  又照常计入，**重叠用量双计**。为此引入查询时派生的**规范身份键**
-  `Pricing::canonical_identity_key(model)`：先取结构键，按顺序判定——
-  **(c) 已核实别名映射**（`CONFIRMED_MODEL_ALIASES`，键 = 完整结构身份键）
-  命中即返回规范键；否则按**精确末段键**（含变体，**不做前缀回退**）在
-  models.dev 条目中收集可信身份键集合（`TIER_MODELSDEV` 条目 display 的
-  identity_key）；当且仅当该集合**恰有一个**可信键 `K` 时确认别名——结构键
-  本身等于 `K`（渠道官方写法）→ 保持；**无渠道前缀**的裸标识 → 归一到 `K`；
-  其余（带未确认渠道前缀，如 `zenmux/…`）→ 保持结构键。集合为空或多个
-  （歧义）→ 保持结构键。
-  - **确认边界（宁可少合并，不可误合并）**：只有三类关系可确认——
-    (a) 完整标识与某 models.dev 条目 ID 等价；(b) 无渠道前缀的裸标识其末段
-    键**精确**命中**唯一一个** models.dev 模型；(c) **已核实别名对**的明确
-    映射（v0.9.4 补修一）。不同版本、不同变体、仅展示名相同、裸末段命中多个
-    模型、带未确认渠道前缀的写法**一律不合并**；前缀回退**不参与**身份确认；
-    压缩后为空的基名不进入确认。
-  - **(c) 类为什么必要（v0.9.4 补修一）**：真实 models.dev 快照里同一末段
-    可能有数十个渠道候选（本机 `claudefable52` 有 **24** 个），(b) 的「唯一
-    候选」条件因歧义永不成立，已核实的同一模型仍被拆成两行。因此为
-    `claude-fable-5-2` ↔ `anthropic/claude-fable-5.2` 建立明确映射
-    （`claudefable52` → `anthropic/claudefable52`），**先于**目录判断，与价格
-    目录无关：候选增删、排序变化、缺少价格快照都仍归一组。映射按完整结构键
-    **精确**匹配（含 `/` 与 `: 变体` 结构），故 `:free` / `:thinking` / 显式空
-    变体 / 日期后缀 / `zenmux/…` 都不命中。新增条目必须先核实两侧确为同一
-    模型版本。
-  - **查询时派生，升级零迁移**：规范身份是**查询快照内**由冻结价格表派生的
-    视图；历史库任何列（含 `model_identity` / `identity_revision`）不改写，
-    不 bump `IDENTITY_REVISION` / `INDEX_VERSION` / `HISTORY_SCHEMA_VERSION`、
-    不改 `persistent_format` 指纹。已导入数据升级后直接生效，无需清库或重导。
-    **无 models.dev 快照时**：(c) 类已核实别名对仍归一，其余 `trusted` 为空
-    → 保持结构键（保守降级不合并）；同步后 (a)/(b) 自动生效。会话内价格冻结
-    → 同一分页会话身份稳定。规范键仍是结构形式（`anthropic/claudefable52`），
-    不是压缩展示名。
-  - **应用点（全部查询侧）**：聚合分组键、覆盖桶键（`collect_detail_buckets` /
-    `select_rollup_contributions`）、`covered_detail`、聚合跳过判定、下钻匹配
-    与下钻指纹（`drill_fingerprint` 模型分量）全部使用同一规范键；三向选择
-    （A/B/C）规则本身不变，别名不得造成双计或漏计。`collect_detail_buckets`
-    的 SQL 收窄集合经 `ReadSnapshot::distinct_model_identities(app)` 取库内
-    存储身份，逐一经 `canonical` 归一后保留命中汇总规范键者作为 IN 集合。
-    **写入路径不改**：原始事件、请求去重（`event_write_of` /
-    `lookup_overlap_candidate` 仍用结构 `identity_key`）、逐请求 `estimate`
-    的候选/分段/时间档规则一律不变。合并后代表写法 = 组内最小原始写法，
-    展示名命中可信名；请求明细行继续显示各自原始 ID。
-  - **前端视图快照 v22（v0.9.4 升级）**：别名合并与 CCS 日汇总下钻改变了
-    快照里的分组行数、下钻 key 与明细行数，`SNAPSHOT_VERSION` 21 → **22**；
-    v21 快照（v0.9.3 写下的，发行号与 0.9.4 相邻但格式版本相同）**读取时
-    忽略**，由首次正常查询从现有历史库重建 v22。否则升级后首屏可能继续显示
-    两行同名模型或空的 CCS 明细，首次查询失败时还会把旧结果当 stale 缓存
-    回显、掩盖「刷新失败」。筛选偏好（localStorage）与时区（settings.toml）
-    独立保存，拒读快照不改写两者；后端视图缓存原样存取 JSON、不校验版本。
+- **模型统计分组与展示名（v0.9.7）**：聚合表、图表、原生请求下钻、CCS 日行
+  展示分组和下钻指纹共用冻结查询内的 `Pricing::model_stats_key`（`Group.key`）。
+  确认同版本的渠道或计费档跨应用合为一组；未确认时只用保留 `/` 与 `:` 的
+  完整结构等价键。前端按后端分组绘图，不按标签二次归并。确认规则如下：
+  - **明确映射**：`hy3`、`tencent/hy3` 与 `tencent/hy3:free` 共用 `tencent/hy3`，
+    显示 **Hy3**。既有 Fable 两种写法及已核实的 Opus 4.7 裸名与 Anthropic ID
+    同样保留明确映射；完整结构键精确命中，不依赖快照存在或候选量。
+  - **目录证据**：models.dev 的 [`canonical_model_id`](https://github.com/anomalyco/models.dev#api-reference)
+    来自上游 `base_model`（明确的 `lab/model`）。统计读取完整提供方条目；对
+    `openrouter/<路由 ID>` 同时接受该条目明确描述的 OpenRouter 路由 ID。完整
+    型号末段等价只作版本保护；仅在目录明示关系中允许 `:free` 计费档差异。
+    例如目录中 Gemma 4 26B A4B 的 `google/gemma-4-26b-a4b-it` 与
+    `google/gemma-4-26b-a4b-it:free` 共享目标。缺失、无效或有冲突的关系不推断，
+    不按候选数量、展示名、相似文本或前缀回退判断，不全局删除后缀。Preview、
+    日期版本、独立语义变体（如 `:thinking`）与未确认同名异模不并入基础版。
+  - **名称与费用**：`Group.label` 用已核实的名称或可信 models.dev 模型级 `name`
+    （优先基础键），缺失则用原始 ID 的稳定代表写法，不显示压缩键。下钻可传
+    `Group.key` 或确认的原始 ID，明细仍显示原始 ID。各请求按原始 ID 和自身时间/
+    分段计价，各 CCS 采用贡献按来源费用或适用费率逐条计价，之后才加总；显式零价
+    与实际用量全部缺价必须分别显示。**不把展示键用于请求身份、计价或覆盖取证**
+    （覆盖仍用原 `canonical_identity_key`，见 §5.1）。
+  - **升级零迁移**：`SNAPSHOT_VERSION` 22 → **23**，旧界面快照忽略并由首次成功
+    查询重建，筛选偏好与时区照常保留。历史库（含 `model_identity` / `identity_revision`）、
+    已导入 CCS、费率快照与既有价格索引不因升级重写，无须重新导入。目录元数据在
+    正常同步时作为可选展示字段保留，不影响计价输入与价格索引版本。
 - **价格索引与费用视图失效（2026-10-10）**：索引版本 **v11**（2026-11-13
   起；T1 OpenRouter 分档派生 + T3 缓存缺价按 0 估算改变派生值与金额），
   来源签名同时携带**匹配规则版本**（`rules:v11`）——规则升级后即使来源
@@ -877,11 +842,12 @@ v7 后新格式以强身份天然去重；弱记录（旧格式）沿用保守�
 判定用**整桶请求数之和**与**四桶逐项**，逐行比较会把"明细只覆盖一个分片"
 误判成"明细不完整"。CCS 只补充 Claude Code 被清理的会话历史（与是否承担
 路由无关，CCS 从文件取得用量）；其他应用保持现行规则，日汇总不参与统计。
-**桶键的模型分量使用规范身份键**（v0.9.4，见 §4「跨渠道别名归一」）：
-`collect_detail_buckets` 与 `select_rollup_contributions` 都经
-`canonical_identity_key` 归一，原生明细（裸名）与 CCS 汇总（渠道前缀写法）
-指向同一确认模型时落入**同一桶**，避免汇总桶被误判「无明细」整桶采用、
-原生明细又照常计入造成**重叠用量双计**。三向选择（A/B/C）规则本身不变。
+**桶键保留 v0.9.4 覆盖身份**：`collect_detail_buckets`、`select_rollup_contributions`、
+聚合跳过与明细覆盖标记仍用 `canonical_identity_key`。先匹配既有 Fable 明确映射，
+否则只对无命名空间的裸标识按精确末段（含变体）查找唯一 models.dev 结构键；其余
+保留各自结构键。SQL 收窄时从库存储键经同一规则选出可能匹配的模型。这样既有覆盖
+判定不变，**不**因新统计分组扩大：例如同应用同日的 Hy3 普通档与免费档不因显示
+一行就共享覆盖证据。请求去重/写入仍用原有请求及结构身份。
 
 **边界取哪个时刻**：必须是来源库一致读快照**建立之前**捕获的时刻
 （`CcsSource::open` 取时刻，再开读事务），不是预览写完数据之后才生成的
@@ -1127,17 +1093,17 @@ SQLite backup API 取得一致副本；产品真实查询与独立核算（不�
   缺失 → `estimate_rollup`（只采用可证明适用的费率）；无候选 → 全 unknown。
   聚合与下钻行**共用同一函数**，`total_cost_usd` 合成规则与 `finish` 相同，
   金额按构造一致，不得另写一套。请求数 / 四桶受检累加（SF08）。
-- **合并与排序**：合并键 = `(来源统计日, 规范模型身份)`，跨 provider /
-  logical_source 合并（同日多渠道汇总合并为一行，请求数 / 四桶 / 费用 =
+- **合并与排序**：合并键 = `(来源统计日, 来源时区, 应用, 模型统计分组键)`，跨 provider /
+  logical_source 合并（同日多渠道/计费档已采用汇总合并为一行，请求数 / 四桶 / 费用 =
   各渠道之和）；`models` 列出合并的原始渠道 ID（去重排序），代表写法 =
-  最小原始写法，`label` 命中可信展示名。排序 = **日降序 → 规范模型键升序**
+  最小原始写法，`label` 命中可信展示名。排序 = **日降序 → 统计分组键升序**
   （确定、与筛选无关）。
 - **日粒度诚实**：`ts = "YYYY-MM-DD"`（来源统计日，**不补造时分秒**）；
   `record_id` / `session_id` / `project` 置空（项目列显示「—」，不补造归属）；
   应用列显示来源名「CCS」（`agent = "claude-code"`，`rollup.source = "ccs"`）。
   `EventRow.rollup = Some(RollupRowMeta)` 标记本行是日汇总行；常规字段
   `cost_usd = total_cost_usd`（None = 完全无费用依据 → 既有「未知」标签）。
-- **筛选对齐**：模型下钻按 `canonical(filter.model)` 匹配汇总行规范键；
+- **筛选对齐**：模型下钻按 `model_stats_key(filter.model)` 匹配汇总行分组键；
   日下钻 `filter.day == row.day`（来源统计日；按日敏感时区不一致的汇总本就不在
   contributions 里）；**项目下钻与聚合同一判定**（v0.9.4 补修二）——日汇总没有
   项目归属，按项目聚合时归入 `model::UNKNOWN_PROJECT`（`(未知)`）组，因此
@@ -1146,7 +1112,7 @@ SQLite backup API 取得一致副本；产品真实查询与独立核算（不�
   无下钻返回全部采用汇总的合并日行（每模型每日一条）。`agent` 主筛选、
   `detail_only`、时刻范围（instant）、时区不匹配由 contributions 为空天然保证
   （与 §5.1 一致）。
-- **覆盖标记**：`build_event_row` 以 `selection.covered_detail` + 规范键 +
+- **覆盖标记**：`build_event_row` 以 `selection.covered_detail` + 覆盖桶模型键 +
   来源时区日 + `ts <= since` 判定覆盖（与聚合跳过判定**同一规则**），命中写
   `EventRow.covered_by_rollup = Some(day)`。被覆盖请求**仍可查看**，前端标记
   「已计入汇总」并说明计入哪一天、总量不重复计入；明细视图始终保留原始请求。
@@ -1367,5 +1333,5 @@ SQLite backup API 取得一致副本；产品真实查询与独立核算（不�
 | `cache_write_input_tokens` 字段存在性与订阅流置零 | [openai/codex#32479](https://github.com/openai/codex/issues/32479)（0.145.0 修复 + OpenAI 成员回复） | codex-cli ≥ 0.145.0 |
 | 重播特征（同值不同时刻、无身份字段） | M2 实测 2,897 组（本机 47 文件） | M2 时点 |
 | Claude 四字段互斥 | [Anthropic Messages API usage 文档](https://docs.claude.com/en/docs/build-with-claude/prompt-caching)（官方字段定义） | 现行 API |
-| 跨渠道别名归一（查询时派生、升级零迁移）：已核实别名映射优先，其次唯一可信 models.dev 模型确认，其余保守不合并；纯汇总模型下钻按统计日返回 CCS 日行，费用与聚合共享函数逐项一致 | `tests/model_alias_rollup_drilldown.rs`、`tests/model_identity_contract.rs`、`pricing.rs` canonical 单元测试（合成夹具 + 临时目录） | v0.9.4 |
+| 模型统计展示与 CCS 覆盖分离：明确别名或可信目录基础 ID 才能合并；跨应用、计费档、下钻游标、四桶与费用对账；既有 Fable 覆盖、Opus 日行不变 | `tests/confirmed_model_stats.rs`、`tests/model_alias_rollup_drilldown.rs`、`tests/model_alias_rollup_review.rs`（合成夹具 + 临时目录） | v0.9.7 |
 | 独立复核补修：24 候选多渠道快照下确认别名仍一组（候选增删/乱序/无快照对照）；「未知项目」下钻与聚合同一判定并含 CCS 日行；日行分组/游标索引冻结、费用只对页内行按需计价并复用 | `tests/model_alias_rollup_review.rs`、`tests/rollup_drill_pricing_calls.rs`（调用计数证明）、`pricing.rs` confirmed-alias 单元测试；真实浏览器 `rollup_drilldown_rows` 契约（按项目/按模型合计逐项相等、「未知」组下钻请求数与四桶费用对账、具体项目无日行） | v0.9.4 |

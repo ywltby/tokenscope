@@ -2,8 +2,8 @@
 // UX03：请求级费用明细浮层（可访问性组件）——从 EventTable 列渲染函数
 // 提取为独立组件，使真实浮层路径可被测试直接挂载。
 // 可访问性契约：
-// - 触发器名称含当前请求金额（UX07 request 格式）与动作说明；未知价格
-//   由父层渲染 NTag（不进入本组件）；
+// - 触发器名称含当前请求金额或「未知」与动作说明；没有候选、无费用明细
+//   时由父层渲染 NTag；
 // - hover/focus/pinned 三态分离：hover 随指针、focus 随键盘焦点（focus
 //   在时鼠标离开不关闭）、click/Enter/Space 固定切换；Escape 一律关闭；
 // - RC06：**固定**后点击浮层与触发器之外的位置必须关闭（父层清除 pinnedKey）；
@@ -12,7 +12,7 @@
 // 事件转发给父层。
 import { computed, h, onBeforeUnmount, onMounted, ref, useId } from "vue";
 import { NTooltip } from "naive-ui";
-import { formatCostBreakdownRows } from "../lib/costBreakdown";
+import { formatCostBreakdownRows, isRequestFullyUnpriced } from "../lib/costBreakdown";
 import { formatMoney } from "../lib/formatMoney";
 import { UNIT_PRICE_DENOMINATOR } from "../lib/tokenDisplay";
 import { t } from "../lib/translate";
@@ -37,7 +37,12 @@ const emit = defineEmits<{
   (e: "escape"): void;
 }>();
 
-const ariaLabel = computed(() => t("cost.ariaLabel", { cost: formatMoney(props.cost, "request") }));
+const unpriced = computed(() => isRequestFullyUnpriced(props.breakdown.lines));
+const hasUnpriced = computed(() =>
+  props.breakdown.lines.some((line) => line.tokens > 0 && !line.priced),
+);
+const displayCost = computed(() => formatMoney(unpriced.value ? null : props.cost, "request"));
+const ariaLabel = computed(() => t("cost.ariaLabel", { cost: displayCost.value }));
 const descId = `ts-cost-bd-${useId()}`;
 
 // RC06：外部点击关闭。NTooltip 的 clickoutside 在 trigger="manual" 下不可靠
@@ -113,6 +118,7 @@ function renderContent(): ReturnType<typeof h> {
         ref="triggerRef"
         type="button"
         class="ts-focusable cost-trigger"
+        :class="{ 'cost-unpriced': hasUnpriced }"
         :aria-label="ariaLabel"
         :aria-expanded="open"
         :aria-describedby="open ? descId : undefined"
@@ -123,7 +129,7 @@ function renderContent(): ReturnType<typeof h> {
         @click="emit('toggle')"
         @keydown.escape="emit('escape')"
       >
-        {{ formatMoney(cost, "request") }}
+        {{ displayCost }}
       </button>
     </template>
     <component :is="renderContent" />
@@ -144,5 +150,8 @@ function renderContent(): ReturnType<typeof h> {
   padding: 0;
   text-align: inherit;
   font-variant-numeric: inherit;
+}
+.cost-unpriced {
+  color: var(--ts-warning);
 }
 </style>

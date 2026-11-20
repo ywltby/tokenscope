@@ -5,7 +5,9 @@
 
 ## 现在执行什么
 
-**2026-11-20 已实施、提交审查：分段控件冷启动首帧高亮修复**：[实施计划](active/2026-11-20-segmented-control-cold-start.md)，[PR #77](https://github.com/ywltby/tokenscope/pull/77)。已核对 PR #76 合并且 v0.9.5 已发布，从最新 main `bd7c569` 开独立修复分支，工具取号 0.9.6 并登记上一版基线。旧首帧实测 2px/32px、2px/63px；修复后从首帧完整对齐，未测量时按钮材质保底，有效测量后滑动层无动画接管，只有真正切换选项才滑动。前端 1205 测试、首帧 129 条逐帧/交互断言与正常完整钩子通过；最新 HEAD 必需 CI 以 PR 检查及交付回复为准，不合并、不发布、不安装。
+**2026-11-21 本地验收通过、准备审查：已确认的模型渠道与计费档合并展示**：[实施计划](active/2026-11-20-confirmed-model-stats-grouping.md)。从 main `f0fc12e` 独立分支，以合成 WorkBuddy `hy3` + CCS `tencent/hy3:free` 先复现两行，再分离统计展示键与既有覆盖证据；只按明确映射或目录基础 ID 合并，逐条计价不变，快照 v22→v23。Rust 1047、前端 1212、16 个具名浏览器契约通过；版本工具取号 0.9.7、登记 v0.9.6 基线。正常钩子、PR 最新 HEAD 门禁以计划交付记录为准，不承接前一 PR 的合并/发布授权。
+
+**2026-11-20 已合并发布 v0.9.6：分段控件冷启动首帧高亮修复**：[实施计划](active/2026-11-20-segmented-control-cold-start.md)，[PR #77](https://github.com/ywltby/tokenscope/pull/77)。用户独立授权后合并为 `f0fc12e`；[Release](https://github.com/ywltby/tokenscope/actions/runs/44730666373) 与 [Native UI](https://github.com/ywltby/tokenscope/actions/runs/44730666171) 成功，[同提交 main CI](https://github.com/ywltby/tokenscope/actions/runs/44730666163) 的 frontend/gate 因两条切换动画末帧偏差约 0.253px 超过 0.25px 失败（冷启动首帧均过），不记为全绿基线；本机未安装。旧首帧 2px/32px、2px/63px；修复后未测量时按钮材质保底，有效测量后滑动层无动画接管，真正切换才滑动。本轮 Hy3 独立验证、不承接历史合并/发布授权。
 
 **2026-11-20 已合并发布 v0.9.5：模型聚合名称与模型图逐行标签修复**：[实施计划](active/2026-11-20-model-chart-readable-rows.md)，[PR #76](https://github.com/ywltby/tokenscope/pull/76)。移除模型行尾随 `›`，模型图按缩放内可见模型数预留至少 24px 行高并保留全部标签；5/20/40 模型实测高度 320/560/1040px，40→21 模型收短至 584px，显示全部恢复 40/40，行筛选/费用隔离/动画/隐藏恢复保留。前端 1201 例、模型图 121 条浏览器断言与正常完整钩子通过；验收架的强调色插值漏计、SmartScreen 精确缓存枚举竞态、托盘自测容量已先红后绿补修。用户后续明确授权合并并允许自动发布：以已审查 HEAD `51542cc` 普通合并为 `bd7c569`；[v0.9.5](https://github.com/ywltby/tokenscope/releases/tag/v0.9.5) 预发布公开，main CI/Native 与 Release [44693173944](https://github.com/ywltby/tokenscope/actions/runs/44693173944) 全成功（19 作业含 12 组单跳与两条连续升级链）。标签解引用/metadata 绑定合并提交，安装包 SHA256 `88e2459a…7c22c` 下载后与校验文件/GitHub digest 三方一致；[发布核验记录](https://github.com/ywltby/tokenscope/pull/76#issuecomment-7033516679)。本机安装未授权、未执行；当前分段控件 PR #77 不承接该历史合并/发布授权。
 

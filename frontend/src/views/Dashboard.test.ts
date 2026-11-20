@@ -2402,7 +2402,7 @@ describe("Dashboard v0.9.4 升级（v21 视图快照拒读）", () => {
     w.unmount();
   });
 
-  it("upgraded_query_merges_fable_and_shows_ccs_days：新查询合并 Fable、CCS 下钻两条日行，落盘 v22", async () => {
+  it("upgraded_query_merges_fable_and_shows_ccs_days：新查询合并 Fable、CCS 下钻两条日行，落盘当前快照", async () => {
     useUpgradePreferences();
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "query_begin") return Promise.resolve(queryInfo);
@@ -2429,13 +2429,13 @@ describe("Dashboard v0.9.4 升级（v21 视图快照拒读）", () => {
     const saved = (
       saves.at(-1)![1] as { value: { v: number; report: SummaryReport; events: EventList } }
     ).value;
-    expect(saved.v, "新快照必须是 v22").toBe(22);
+    expect(saved.v, "新快照必须使用当前视图版本").toBe(SNAPSHOT_VERSION);
     expect(fableRows(saved.report).length).toBe(1);
     expect(saved.events.rows.length).toBe(2);
     w.unmount();
   });
 
-  it("v22_snapshot_still_restores_first_frame：偏好匹配时 v22 可恢复，后台查询成功后由新结果替换", async () => {
+  it("current_snapshot_still_restores_first_frame：当前版本偏好匹配时可恢复，后台查询成功后由新结果替换", async () => {
     useUpgradePreferences();
     const cached = {
       ...v21Payload(),
@@ -2480,3 +2480,67 @@ describe("Dashboard v0.9.4 升级（v21 视图快照拒读）", () => {
     w.unmount();
   });
 });
+
+it.each([false, true])(
+  "v22 的拆分 Hy3 快照不能恢复；首次查询失败=$0，筛选仍保留",
+  async (fails) => {
+    const drill = { type: "model", key: "tencent/hy3:free", label: "Hy3" };
+    const filters = { by: "model", agent: "all", preset: null, drill };
+    localStorage.setItem(VIEW_FILTERS_KEY, JSON.stringify({ ...filters, rollupsMode: "auto" }));
+    const split: SummaryReport = {
+      ...summaryA,
+      by: "model",
+      groups: [labelled("hy3", 1000, "Hy3", 1), labelled("tencent/hy3:free", 3000, "Hy3", 3)],
+    };
+    const merged: SummaryReport = { ...split, groups: [labelled("tencent/hy3", 4000, "Hy3", 4)] };
+    let resolveSummary!: (v: SummaryReport) => void;
+    let resolveEvents!: (v: EventList) => void;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load")
+        return Promise.resolve({
+          v: 22,
+          saved_at: "2026-11-20T00:00:00Z",
+          filters,
+          rollups_mode: "auto",
+          report: split,
+          events,
+        });
+      if (cmd === "query_summary")
+        return fails
+          ? Promise.reject(new Error("fixture offline"))
+          : new Promise((resolve) => (resolveSummary = resolve));
+      if (cmd === "query_events")
+        return fails
+          ? Promise.reject(new Error("fixture offline"))
+          : new Promise((resolve) => (resolveEvents = resolve));
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(state(w)["report"]).toBeNull();
+    expect(state(w)["events"]).toBeNull();
+    expect(state(w)["stale"]).toBe(false);
+    expect(state(w)["drill"]).toEqual(drill);
+    expect(state(w)["by"]).toBe("model");
+
+    if (fails) {
+      expect(w.text()).toContain("刷新失败");
+      expect(w.text()).not.toContain("缓存数据");
+      await snapshotQueueIdle();
+      expect(invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save")).toHaveLength(0);
+      w.unmount();
+      return;
+    }
+
+    resolveSummary(merged);
+    resolveEvents(events);
+    await flushPromises();
+    await snapshotQueueIdle();
+    expect((state(w)["report"] as SummaryReport).groups).toEqual(merged.groups);
+    const save = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save").at(-1);
+    expect(save?.[1]).toMatchObject({ value: { v: 23, report: merged } });
+    w.unmount();
+  },
+);

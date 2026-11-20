@@ -131,6 +131,20 @@ describe("costBreakdown 行模型（设计系统 Task 6）", () => {
     expect(text(b)).not.toContain("$0.00");
   });
 
+  it("已知分项显式零价与未知分项共存时保留零元小计及未计价说明", () => {
+    const b = bd({
+      cost_usd: 0,
+      complete: false,
+      lines: [
+        { kind: "input", tokens: 100, unit_price: 0, subtotal: 0, priced: true },
+        { kind: "cache_write", tokens: 50, unit_price: null, subtotal: 0, priced: false },
+      ],
+    });
+    expect(rows(b).find((row) => row.total)?.value).toBe("$0.00");
+    expect(rows(b).some((row) => row.unknown)).toBe(true);
+    expect(text(b)).not.toContain("无法估算");
+  });
+
   it("缺失字段显示暂无数据（不猜测渠道/时间）", () => {
     const b = bd();
     b.matched = {

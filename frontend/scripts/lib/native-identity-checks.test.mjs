@@ -91,7 +91,7 @@ const good = {
   model_variants_merge_with_friendly_name: {
     model: snapshot({
       summary: {
-        groups: [{ key: "anthropic/claudeopus55", label: "Synthetic Opus 5.5", requests: 6 }],
+        groups: [{ key: "claudeopus55", label: "Synthetic Opus 5.5", requests: 6 }],
         totals,
       },
     }),

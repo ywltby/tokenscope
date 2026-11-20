@@ -239,19 +239,11 @@ impl QuerySnapshot {
 }
 
 /// 下钻过滤指纹（模型/项目/日——明细侧子查询身份；游标/limit 不参与）。
-/// MP04：模型筛选按**等价身份**归一——同一模型的两种写法（`claude-opus-5-5`
-/// 与 `claude-opus-5.5`）视为同一子查询，游标可在其间续用；不同模型（含
-/// 变体）仍是不同指纹。
-/// v0.9.4：归一再经渠道别名确认（与聚合分组同一规则）——跨渠道写法
-/// 也共享同一子查询指纹。
-pub(crate) fn drill_fingerprint(filter: &EventFilter, pricing: &crate::pricing::Pricing) -> String {
-    let model = filter
-        .model
-        .as_deref()
-        .map(|m| pricing.canonical_identity_key(m));
+/// 模型分量直接用筛选时的统计分组键，别名可续用游标，未确认的模型仍不同。
+pub(crate) fn drill_fingerprint(filter: &EventFilter, model_key: Option<&str>) -> String {
     format!(
-        "model={:?}|project={:?}|day={:?}",
-        model, filter.project, filter.day
+        "model={model_key:?}|project={:?}|day={:?}",
+        filter.project, filter.day
     )
 }
 

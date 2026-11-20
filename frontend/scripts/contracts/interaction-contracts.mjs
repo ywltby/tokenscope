@@ -77,6 +77,7 @@ export const REQUIRED_CONTRACTS = [
   // v0.9.4（2026-11-19）：跨渠道别名合并为一行 + CCS 日汇总下钻行（日粒度、
   // CCS 应用列、被覆盖标记、混合分页稳定）。
   "rollup_drilldown_rows",
+  "confirmed_model_stats_grouping",
   // C06（控件材质与浮层可读性计划）：像素级边界对比度与焦点契约。
   "ui_control_material",
   // BS04（启动卡死取证与引导期恢复计划）：检查挂起可见可重查、迟到响应
@@ -3397,6 +3398,111 @@ const IMPL = {
         );
         await ctx.shot(name, session, `${viewport.label}-consolidation`);
         await ctx.finishSession(session);
+      } finally {
+        await session.close();
+      }
+    }
+  },
+
+  async confirmed_model_stats_grouping(ctx) {
+    const name = "confirmed_model_stats_grouping";
+    for (const [theme, viewport] of [
+      ["light", VIEWPORTS.desktop],
+      ["dark", VIEWPORTS.small],
+    ]) {
+      const session = await ctx.open({ fixture: "hy3-stats", viewport, theme });
+      const page = session.page;
+      const record = (label, pass, detail) =>
+        ctx.record(name, `${theme}/${viewport.label}：${label}`, pass, JSON.stringify(detail));
+      try {
+        await openDashboard(session);
+        await clickSegment(page, "按模型");
+        const row = page.locator(".usage-card tbody tr:not(.total-row)");
+        await row.getByText("Hy3", { exact: true }).waitFor();
+        const group = await row.locator("td").allTextContents();
+        record(
+          "一行 Hy3，汇总与费用同源",
+          (await row.count()) === 1 &&
+            group.map((v) => v.trim().replaceAll(",", "")).join("|") ===
+              "Hy3|6|4765|880|245|320|5645|$1.25",
+          group,
+        );
+
+        // 测量 ECharts 实际 SVG：四个分项色各一段，中心线相同，比例与四桶一致。
+        const chart = page.locator(".chart-canvas svg");
+        await chart.getByText("Hy3", { exact: true }).waitFor();
+        await page.waitForTimeout(600);
+        const geometry = await chart.evaluate((svg) => {
+          const style = getComputedStyle(document.documentElement);
+          const color = (k) => {
+            const hex = style.getPropertyValue(`--ts-chart-${k}`).trim().slice(1);
+            return `rgb(${[0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(", ")})`;
+          };
+          const paths = [...svg.querySelectorAll("path")];
+          const box = (el) => {
+            const b = el.getBoundingClientRect();
+            return { y: b.y + b.height / 2, width: b.width };
+          };
+          return {
+            labels: [...svg.querySelectorAll("text")]
+              .filter((el) => el.textContent === "Hy3")
+              .map(box),
+            buckets: ["input", "output", "cache-write", "cache-read"].map((k) =>
+              paths.filter((path) => getComputedStyle(path).fill === color(k)).map(box),
+            ),
+          };
+        });
+        const unit = geometry.buckets[0][0]?.width / 4200;
+        record(
+          "SVG 一根 Hy3 堆叠柱且四桶逐项对齐",
+          geometry.labels.length === 1 &&
+            unit > 0 &&
+            geometry.buckets.every(
+              (bars, i) =>
+                bars.length === 1 &&
+                Math.abs(bars[0].y - geometry.labels[0].y) < 2 &&
+                Math.abs(bars[0].width - unit * [4200, 880, 245, 320][i]) < 0.6,
+            ),
+          geometry,
+        );
+        await ctx.shot(name, session, "hy3-chart-table");
+
+        await realClick(page, row.locator(".dim-cell"));
+        const calls = () =>
+          session.ipcCalls.filter(
+            (c) => c.cmd === "query_events" && c.args?.model === "tencent/hy3",
+          );
+        const cell = page.locator(".events-card tr", { hasText: "CCS" });
+        const detailRows = page.locator(".events-card tbody tr");
+        const region = page.getByRole("region", { name: "请求明细列表", exact: true });
+        await region.focus();
+        await page.keyboard.press("End");
+        await cell.waitFor({ state: "visible", timeout: 5000 });
+        const detail = (await detailRows.allTextContents()).map((text) => text.replaceAll(",", ""));
+        record(
+          "按统计键下钻跨页：WorkBuddy 原始 ID 与 CCS 日行均出现",
+          detail.length === 4 &&
+            calls().some((c) => c.args.before) &&
+            detail.some((text) => /WorkBuddyhy3/.test(text)) &&
+            detail.some((text) => /日汇总CCSHy3 · 3 次请求/.test(text)),
+          { detail, calls: calls().map((c) => c.args) },
+        );
+        const costCells = await detailRows.locator("td:last-child").allTextContents();
+        record(
+          "逐行区分显式免费、实际缺价、普通估算与 CCS 来源金额",
+          costCells.map((v) => v.trim()).join("|") === "$0.00|未知|$0.0031|$1.25",
+          costCells,
+        );
+
+        await cell.getByText(/Hy3 · 3 次请求/).focus();
+        const raw = page.locator(".n-tooltip:visible").filter({ hasText: "tencent/hy3:free" });
+        await raw.waitFor({ state: "visible", timeout: 5000 });
+        record(
+          "键盘聚焦 CCS 模型可追溯原始免费档 ID",
+          (await raw.count()) === 1,
+          await raw.first().innerText(),
+        );
+        await ctx.shot(name, session, "hy3-drill-ccs-id");
       } finally {
         await session.close();
       }

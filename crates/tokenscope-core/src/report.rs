@@ -3058,7 +3058,7 @@ pub struct RollupRowMeta {
 }
 
 /// 合并后的一条下钻日汇总行（内部形态）：按 `(统计日, 来源时区, 应用,
-/// 规范模型身份)` 归并同日多渠道贡献，排序 = 日降序 → 身份升序。
+/// 模型统计分组键)` 归并同日多渠道贡献，排序 = 日降序 → 分组键升序。
 ///
 /// v0.9.4 补修三：分组、顺序与游标定位在建快照时算一次并冻结（**不含计价**）；
 /// 估算费用放在按需填充的单元里，只有真正落到当前页的行才计价，同一快照内
@@ -3162,8 +3162,8 @@ impl RollupDrillIndex {
 /// v0.9.4：从冻结快照的**最终采用**贡献构建下钻日行索引（只分组，不计价）。
 ///
 /// 只取 `rollup_selection.contributions`（三向选择后的采用集）——A/C 类
-/// 排除的汇总不出现，与聚合计入完全同源；同日多渠道（provider）按规范
-/// 身份合并一行。请求数/四桶/来源费用受检累加；估算费用留到行真正落到
+/// 排除的汇总不出现，与聚合计入完全同源；同日、同应用及时区按模型统计
+/// 分组键合并一行。请求数/四桶/来源费用受检累加；估算费用留到行真正落到
 /// 当前页时再算（[`DrillRollupRow::cost`]）。
 pub(crate) fn build_rollup_drill_index(
     selection: &RollupSelection,
@@ -3174,7 +3174,7 @@ pub(crate) fn build_rollup_drill_index(
         DrillRollupRow,
     > = std::collections::BTreeMap::new();
     for (i, r) in selection.contributions.iter().enumerate() {
-        let model_key = pricing.canonical_identity_key(&r.model);
+        let model_key = pricing.model_stats_key(&r.model);
         let key = (
             std::cmp::Reverse(r.day.clone()),
             model_key.clone(),
@@ -3341,15 +3341,10 @@ pub(crate) fn query_events_from(
     const PAGE_SCAN_BATCH: usize = 256;
     let t = std::time::Instant::now();
     let pricing = snapshot.pricing().clone();
-    let drill_fp = crate::query::drill_fingerprint(filter, &pricing);
     // 下钻过滤：在固定行序上筛匹配行（绝对位置），total 在同一快照内恒定。
-    // MP04：模型筛选按**等价身份**匹配——前端传身份键（Group.key）或原始
-    // 写法都能命中，规则与聚合分组完全一致。
-    // v0.9.4：匹配同样经渠道别名确认，跨渠道写法的明细都归入同一子查询。
-    let model_key: Option<String> = filter
-        .model
-        .as_deref()
-        .map(|m| pricing.canonical_identity_key(m));
+    // 模型筛选与游标共用同一统计键；前端传 Group.key 或确认的原始 ID 均命中。
+    let model_key: Option<String> = filter.model.as_deref().map(|m| pricing.model_stats_key(m));
+    let drill_fp = crate::query::drill_fingerprint(filter, model_key.as_deref());
     // 游标定位：返回严格位于游标行之后的匹配行（排序位次语义不变）。
     let after = match &filter.before {
         Some(cur) => crate::query::locate_cursor(snapshot, cur, &drill_fp)? + 1,
@@ -3388,7 +3383,7 @@ pub(crate) fn query_events_from(
                 .is_none_or(|d| e.ts.to_zoned(snapshot.tz.clone()).date().to_string() == *d);
             let model_ok = model_key
                 .as_ref()
-                .is_none_or(|k| pricing.canonical_identity_key(&e.model) == *k);
+                .is_none_or(|k| pricing.model_stats_key(&e.model) == *k);
             let project_ok = filter.project.as_ref().is_none_or(|p| e.project == *p);
             if !(day_ok && model_ok && project_ok) {
                 return Ok(());

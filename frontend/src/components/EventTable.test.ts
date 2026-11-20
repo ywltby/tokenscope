@@ -418,6 +418,36 @@ describe("EventTable 费用触发器可访问性（UX03）", () => {
     document.body.innerHTML = "";
   });
 
+  it.each([
+    { priced: false, text: "未知" },
+    { priced: true, text: "$0.00" },
+  ])("实际用量费用不明与显式零费率不混淆：$text", ({ priced, text }) => {
+    const w = mount(CostBreakdownTooltip, {
+      props: {
+        cost: 0,
+        breakdown: {
+          ...bd(),
+          cost_usd: 0,
+          lines: [
+            {
+              kind: "cache_write",
+              tokens: 150,
+              unit_price: priced ? 0 : null,
+              subtotal: 0,
+              priced,
+            },
+          ],
+          unknown: { input: 0, output: 0, cache_write: priced ? 0 : 150, cache_read: 0 },
+          complete: priced,
+        },
+        open: false,
+        pinned: false,
+      },
+    });
+    expect(w.find(".cost-trigger").text()).toBe(text);
+    w.unmount();
+  });
+
   it("cost_trigger_exposes_amount_and_description：名称含金额、描述指向存在节点", async () => {
     const { host, trigger } = mountCell();
     expect(trigger.exists(), "费用触发器应存在").toBe(true);
@@ -650,6 +680,31 @@ describe("EventTable 日汇总下钻行（v0.9.4）", () => {
     expect(content).toContain("anthropic/claude-opus-4-7");
     expect(content).toContain("claude-opus-4-7");
     expect(content).toContain("Asia/Shanghai");
+  });
+
+  it("合并模型 ID 支持键盘聚焦、移开鼠标仍保持、Escape 关闭", async () => {
+    const r = rollupRow({ rollup: rollupMeta({ label: "Hy3", models: ["tencent/hy3:free"] }) });
+    const w = mountWith(r);
+    const tip = () => renderOf(w, "model", r) as VNode;
+    const vnode = tip();
+    const trigger = (vnode.children as { trigger: () => VNode }).trigger();
+    const handlers = trigger.props as {
+      "aria-label": string;
+      onFocus: () => void;
+      onMouseleave: () => void;
+      onKeydown: (e: KeyboardEvent) => void;
+    };
+    expect(handlers["aria-label"]).toContain("tencent/hy3:free");
+    handlers.onFocus();
+    await nextTick();
+    expect(tip().props?.show).toBe(true);
+    handlers.onMouseleave();
+    await nextTick();
+    expect(tip().props?.show).toBe(true);
+    handlers.onKeydown(new KeyboardEvent("keydown", { key: "Escape" }));
+    await nextTick();
+    expect(tip().props?.show).toBe(false);
+    w.unmount();
   });
 
   it("rollup_cost_reuses_group_tooltip：费用列走分组浮层，构成与聚合行同源，三态协调一致", async () => {
