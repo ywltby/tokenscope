@@ -78,6 +78,7 @@ export const REQUIRED_CONTRACTS = [
   // CCS 应用列、被覆盖标记、混合分页稳定）。
   "rollup_drilldown_rows",
   "confirmed_model_stats_grouping",
+  "saved_model_drill_migration",
   // C06（控件材质与浮层可读性计划）：像素级边界对比度与焦点契约。
   "ui_control_material",
   // BS04（启动卡死取证与引导期恢复计划）：检查挂起可见可重查、迟到响应
@@ -3398,6 +3399,84 @@ const IMPL = {
         );
         await ctx.shot(name, session, `${viewport.label}-consolidation`);
         await ctx.finishSession(session);
+      } finally {
+        await session.close();
+      }
+    }
+  },
+
+  async saved_model_drill_migration(ctx) {
+    const name = "saved_model_drill_migration";
+    for (const c of [
+      { fixture: "legacy-model-drill", old: "opencodego/spacebunny", next: "spacebunny", rows: 1 },
+      { fixture: "legacy-model-ambiguous", old: "opencodego/spacebunny", next: null, rows: 2 },
+      { fixture: "legacy-model-drill", old: "missing/spacebunny", next: null, rows: 1 },
+    ]) {
+      const session = await ctx.open({
+        fixture: c.fixture,
+        theme: "light",
+        viewport: VIEWPORTS.desktop,
+      });
+      try {
+        const page = session.page;
+        await session.context.addInitScript((key) => {
+          if (!localStorage.getItem("tokenscope-view-filters"))
+            localStorage.setItem(
+              "tokenscope-view-filters",
+              JSON.stringify({
+                by: "model",
+                agent: "claude",
+                preset: { kind: "days", days: 7 },
+                rollupsMode: "detail_only",
+                drill: { type: "model", key, label: "Space Bunny" },
+              }),
+            );
+        }, c.old);
+        await openDashboard(session);
+        await page.waitForSelector(".events-card tbody tr");
+        const rows = page.locator(".events-card tbody tr");
+        const calls = session.ipcCalls.filter((call) => call.cmd === "query_events");
+        const saved = await page.evaluate(() =>
+          JSON.parse(localStorage.getItem("tokenscope-view-filters")),
+        );
+        const first = calls[0]?.args;
+        ctx.record(
+          name,
+          `${c.fixture}/${c.old} 首次打开即返回正确明细，未重新点击表格`,
+          (await rows.count()) === c.rows &&
+            calls.length === 1 &&
+            first.model === c.old &&
+            first.migrateLegacyModel === true,
+          JSON.stringify({ first, rows: await rows.allTextContents() }),
+        );
+        ctx.record(
+          name,
+          `${c.fixture}/${c.old} 只迁移或清除该模型下钻，其余偏好保留`,
+          saved.modelKeyVersion === 1 &&
+            (saved.drill?.key ?? null) === c.next &&
+            saved.by === "model" &&
+            saved.agent === "claude" &&
+            saved.preset?.days === 7 &&
+            saved.rollupsMode === "detail_only",
+          JSON.stringify(saved),
+        );
+        await page.locator(".events-card").scrollIntoViewIfNeeded();
+        await ctx.shot(name, session, "first-open");
+        const count = session.ipcCalls.filter((call) => call.cmd === "query_events").length;
+        await page.reload({ waitUntil: "networkidle" });
+        await page.waitForSelector(".events-card tbody tr");
+        const reloaded = session.ipcCalls
+          .filter((call) => call.cmd === "query_events")
+          .slice(count);
+        ctx.record(
+          name,
+          `${c.fixture}/${c.old} 第二次启动直接恢复新偏好，不再进入兼容路径`,
+          reloaded.length === 1 &&
+            reloaded[0].args.model === c.next &&
+            !reloaded[0].args.migrateLegacyModel &&
+            (await page.locator(".events-card tbody tr").count()) === c.rows,
+          JSON.stringify(reloaded.map((call) => call.args)),
+        );
       } finally {
         await session.close();
       }

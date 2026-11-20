@@ -2,8 +2,6 @@
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
-
 use crate::model_identity::ModelIdentity;
 use crate::report::retained::{ByteCount, MAP_BUCKET_OVERHEAD, capacity_bytes, string_bytes};
 
@@ -29,31 +27,11 @@ pub(super) struct ModelStatsGrouping {
 
 impl ModelStatsGrouping {
     /// models.dev 的 `canonical_model_id` 来自目录显式声明的 `base_model`。
-    /// 只读取身份字段，不读取/重建计价输入或索引；新同步保留的元数据和旧
-    /// 快照可共存。没有这层证据时仅使用已核实的固定别名。
-    pub(super) fn from_snapshot(text: &str) -> Self {
-        #[derive(Deserialize)]
-        struct Catalog {
-            // 缺少必要快照字段的损坏文件不是可用的目录证据。
-            #[serde(rename = "synced_at")]
-            _synced_at: String,
-            entries: Vec<CatalogEntry>,
-        }
-        #[derive(Deserialize)]
-        struct CatalogEntry {
-            id: String,
-            #[serde(
-                default,
-                deserialize_with = "crate::modelsdev::deserialize_canonical_id"
-            )]
-            canonical_model_id: Option<String>,
-        }
-
-        let Ok(catalog) = serde_json::from_str::<Catalog>(text) else {
-            return Self::default();
-        };
+    /// 只消费价格加载器已经校验、执行旧格式兼容处理的快照，不另行宽松解析
+    /// 原文。没有有效目录时，仅使用已核实的固定别名。
+    pub(super) fn from_snapshot(catalog: &crate::modelsdev::Snapshot) -> Self {
         let mut claims: HashMap<String, Option<String>> = HashMap::new();
-        for entry in catalog.entries {
+        for entry in &catalog.entries {
             let Some(base) = entry.canonical_model_id.as_deref() else {
                 continue;
             };

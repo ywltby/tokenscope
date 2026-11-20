@@ -98,6 +98,8 @@ pub struct QuerySnapshot {
     collection: Arc<report::CollectionSnapshot>,
     /// H07：只读事务快照——汇总与分页都从它读取，采集/导入提交后旧查询不变。
     read: Arc<crate::history::ReadSnapshot>,
+    /// 旧偏好迁移使用同一事务、同一来源范围的模型关系，不以当前日期命中数猜键。
+    agent: Option<crate::model::AgentKind>,
     /// RC05：保留字节额度凭证——随本快照的**最后一个 Arc** 释放。
     /// 会话被淘汰但仍有读取者持有时继续占账
     ///（`evicted_but_borrowed_snapshot_stays_charged`）。
@@ -687,6 +689,7 @@ pub fn begin_query_with(opts: &SummaryOptions, collect: bool) -> Result<Arc<Quer
         rollup_drill,
         collection,
         read,
+        agent: opts.agent,
         _reservation: reservation,
     });
 
@@ -763,6 +766,59 @@ pub fn query_summary(query_id: &str) -> Result<report::SummaryReport> {
 /// 按会话分页读取明细（GUI 命令入口；游标必须属于同一会话）。
 pub fn query_events(query_id: &str, filter: &EventFilter) -> Result<report::EventList> {
     with_snapshot(query_id, |snap| report::query_events_from(snap, filter))
+}
+
+/// 仅供旧版已保存模型偏好的首次首页使用。正常下钻/分页仍走严格的 query_events；
+/// 旧键兼容关系绝不进入模型分组、计价或 CCS 覆盖规则。
+pub fn query_events_with_legacy_model(
+    query_id: &str,
+    filter: &EventFilter,
+) -> Result<report::EventList> {
+    let old = filter
+        .model
+        .as_deref()
+        .ok_or_else(|| anyhow!("旧模型下钻迁移缺少模型键"))?;
+    if filter.before.is_some() {
+        anyhow::bail!("旧模型下钻只允许在首页迁移，不能复用旧游标");
+    }
+    with_snapshot(query_id, |snap| {
+        let old_key = crate::model_identity::ModelIdentity::parse(old).identity_key();
+        let pricing = snap.pricing();
+        let mut target: Option<String> = None;
+        let mut ambiguous = false;
+        let mut visit = |model: &str| {
+            let key = pricing.model_stats_key(model);
+            if key == old_key
+                || pricing.canonical_identity_key(model) == old_key
+                || crate::model_identity::ModelIdentity::parse(model).identity_key() == old_key
+            {
+                if target.as_ref().is_some_and(|previous| *previous != key) {
+                    ambiguous = true;
+                } else {
+                    target = Some(key);
+                }
+            }
+        };
+        // 只读冻结事务中所有可见历史模型（不是当前日期下的行），否则空日期
+        // 会被误判成失效。按应用的可见性过滤与普通查询保持一致。
+        for model in snap.read.distinct_model_identities(snap.agent)? {
+            visit(&model);
+        }
+        for rollup in snap.read.rollups(snap.agent)? {
+            visit(&rollup.model);
+        }
+        let to = if ambiguous { None } else { target };
+        let migrated = EventFilter {
+            model: to.clone(),
+            ..filter.clone()
+        };
+        let mut list = report::query_events_from(snap, &migrated)?;
+        list.model_filter_migration = Some(report::ModelFilterMigration {
+            from: old.to_owned(),
+            to,
+        });
+        Ok(list)
+    })
 }
 
 /// 游标 v2：绑定 query_id、主查询指纹、下钻过滤指纹与快照内行位置。

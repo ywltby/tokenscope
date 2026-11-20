@@ -21,7 +21,7 @@ import {
 } from "../lib/viewSnapshot";
 import { initTimezone, resetTimezoneForTests, useTimezone } from "../composables/timezone";
 import { adoptCollectInterval, resetCollectIntervalForTests } from "../composables/collectInterval";
-import { VIEW_FILTERS_KEY } from "../lib/viewFilters";
+import { MODEL_KEY_VERSION, VIEW_FILTERS_KEY } from "../lib/viewFilters";
 import type { RangePreset } from "../lib/rangePreset";
 
 function group(key: string, input: number): Group {
@@ -160,6 +160,7 @@ function useMatchingPreferences(): void {
   localStorage.setItem(
     VIEW_FILTERS_KEY,
     JSON.stringify({
+      modelKeyVersion: MODEL_KEY_VERSION,
       by: "model",
       agent: "claude",
       preset: null,
@@ -2329,6 +2330,7 @@ function useUpgradePreferences(): void {
   localStorage.setItem(
     VIEW_FILTERS_KEY,
     JSON.stringify({
+      modelKeyVersion: MODEL_KEY_VERSION,
       by: "model",
       agent: "claude",
       preset: null,
@@ -2486,7 +2488,10 @@ it.each([false, true])(
   async (fails) => {
     const drill = { type: "model", key: "tencent/hy3:free", label: "Hy3" };
     const filters = { by: "model", agent: "all", preset: null, drill };
-    localStorage.setItem(VIEW_FILTERS_KEY, JSON.stringify({ ...filters, rollupsMode: "auto" }));
+    localStorage.setItem(
+      VIEW_FILTERS_KEY,
+      JSON.stringify({ ...filters, rollupsMode: "auto", modelKeyVersion: MODEL_KEY_VERSION }),
+    );
     const split: SummaryReport = {
       ...summaryA,
       by: "model",

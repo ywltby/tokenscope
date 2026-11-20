@@ -909,6 +909,13 @@ function rowsFor(kind) {
       return Array.from({ length: 8 }, (_, i) =>
         eventRow(i + 1, { model: `model-${String(i).padStart(2, "0")}` }),
       );
+    case "legacy-model-drill":
+      return [eventRow(1, { model: "spacebunny", identity: "spacebunny" })];
+    case "legacy-model-ambiguous":
+      return [
+        eventRow(1, { model: "spacebunny", identity: "spacebunny" }),
+        eventRow(2, { model: "opencode-go/spacebunny", identity: "opencodego/spacebunny" }),
+      ];
     case "hy3-stats":
       return [
         hy3Request(3, "tencent/hy3:free", "claude-code", [200, 80, 5, 20], [0, 0, 0, 0]),
@@ -1007,6 +1014,17 @@ function rowsFor(kind) {
 }
 
 function dimGroups(kind, by, session) {
+  if (kind === "legacy-model-drill" || kind === "legacy-model-ambiguous") {
+    return rowsFor(kind).map((r) =>
+      group(r.identity ?? r.model, r.input, {
+        label: r.model === "spacebunny" ? "Space Bunny" : "Space Bunny hosted",
+        output: r.output,
+        requests: 1,
+        cost_usd: r.cost_usd,
+        total_cost_usd: r.cost_usd,
+      }),
+    );
+  }
   if (kind === "hy3-stats") {
     return by === "day"
       ? [{ ...HY3_STATS_GROUPS[0], key: "2026-05-28", label: null }]
@@ -1267,10 +1285,14 @@ function createSessionTable(cfg) {
     if (!s) return reject(`query_expired: 会话 ${id} 不存在或已失效，请刷新重试`);
     const rows = s.frozenRows;
     const before = args?.before ?? null;
+    const migrate = args?.migrateLegacyModel === true;
+    if (migrate && (before != null || typeof args.model !== "string" || !args.model))
+      return reject("旧模型下钻只允许在模型首页迁移");
+    const model = migrate ? (cfg.legacyModelTargets?.[args.model] ?? null) : args?.model;
     // 下钻过滤与后端一致（模型/项目/日）。模型按统计分组键命中
     // （identity 缺省退回 model），明细行仍保留原始渠道 ID 供展示。
     let scoped = rows;
-    if (args?.model) scoped = scoped.filter((r) => (r.identity ?? r.model) === args.model);
+    if (model) scoped = scoped.filter((r) => (r.identity ?? r.model) === model);
     // v0.9.4 补修二：日汇总行没有项目归属，只命中「未知」筛选（与聚合分组
     // 同一判定）；具体项目仍只匹配有该项目归属的请求行。
     if (args?.project)
@@ -1302,6 +1324,7 @@ function createSessionTable(cfg) {
       rows: page,
       total: scoped.length,
       warnings: [],
+      ...(migrate ? { model_filter_migration: { from: args.model, to: model } } : {}),
     };
   }
 
@@ -1347,6 +1370,7 @@ export function buildFixture(name) {
       by === "model" && modelGroups ? modelGroups : dimGroups(cfg.kind, by, session),
     pageSize: cfg.pageSize ?? 2,
     expireAfterPages: cfg.expireAfterPages ?? Infinity,
+    legacyModelTargets: cfg.legacyModelTargets,
   });
 
   // 挂起响应：key → {resolve, reject}，由测试在确定时刻 settle。
@@ -1728,6 +1752,14 @@ const SCENARIOS = {
   // v0.9.4：跨渠道别名合并 + CCS 日汇总下钻（混合分页 pageSize=2）。
   "rollup-drill": { kind: "rollup-drill", pageSize: 2 },
   "hy3-stats": { kind: "hy3-stats", pageSize: 2 },
+  "legacy-model-drill": {
+    kind: "legacy-model-drill",
+    legacyModelTargets: { "opencodego/spacebunny": "spacebunny" },
+  },
+  "legacy-model-ambiguous": {
+    kind: "legacy-model-ambiguous",
+    legacyModelTargets: { "opencodego/spacebunny": null },
+  },
   // AC08 归因补修：长路径换行断言需要长路径行在列表里——PR3 起默认行
   // 是短路径（SOURCE_ROWS_DEFAULT），必须声明 merged 才含 LONG_SOURCE_DIR
   // 行；此前全矩阵未在本地跑过，该缺口未被察觉。

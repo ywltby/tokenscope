@@ -2475,9 +2475,9 @@ impl Pricing {
         let mut modelsdev_synced_at = None;
 
         if let Some(text) = reads.modelsdev.text.as_deref() {
-            pricing.model_stats = model_stats::ModelStatsGrouping::from_snapshot(text);
             match crate::modelsdev::parse_snapshot_text(text) {
                 Ok(snapshot) => {
+                    pricing.model_stats = model_stats::ModelStatsGrouping::from_snapshot(&snapshot);
                     raw_modelsdev_count = snapshot.entries.len();
                     modelsdev_synced_at = Some(snapshot.synced_at.clone());
                     for e in snapshot.entries {
@@ -3175,7 +3175,7 @@ impl Pricing {
         self.model_stats.key_for(model)
     }
 
-    /// v0.9.4 规范模型身份，仅保留为 CCS 覆盖桶的旧证据键（查询时派生）。
+    /// v0.9.4 规范模型身份：保留为 CCS 覆盖证据；仅旧偏好的显式迁移读取旧键关系。
     ///
     /// 在结构身份键之上确认渠道别名，使同一模型版本的不同写法
     /// （`anthropic/claude-fable-5.2` 与 `claude-fable-5-2`）共享同一
@@ -3355,7 +3355,7 @@ impl Pricing {
         }
         // 索引文件命中（D2/F10 接线）：签名一致且版本为当前格式（R01：
         // v4/v5 可能携带错误的缓存价语义，拒绝读取、强制重建）→
-        // 免解析双快照，毫秒级恢复完整价格表（含诊断）。
+        // 恢复价格候选（含诊断）；目录元数据仍必须通过 models.dev 完整校验。
         // 索引被拒时的重建原因（见下）随本次结果返回给调用方。
         let mut index_rebuild_note: Option<String> = None;
         if let Ok(Some(index)) = load_index(index_path)
@@ -3383,9 +3383,11 @@ impl Pricing {
             let has_empty_key = index.entries.iter().any(|e| empty_model_key(&e.display));
             if !has_invalid && !stale_keys && !has_empty_key {
                 let mut pricing = Self::from_index(&index);
-                if let Some(text) = reads.modelsdev.text.as_deref() {
+                if let Some(text) = reads.modelsdev.text.as_deref()
+                    && let Ok(snapshot) = crate::modelsdev::parse_snapshot_text(text)
+                {
                     // 旧价格索引无须升级：用同一签名下冻结的目录元数据恢复展示键。
-                    pricing.model_stats = model_stats::ModelStatsGrouping::from_snapshot(text);
+                    pricing.model_stats = model_stats::ModelStatsGrouping::from_snapshot(&snapshot);
                 }
                 let arc = std::sync::Arc::new(pricing);
                 *guard = Some((sig.clone(), arc.clone(), index.warnings.clone()));

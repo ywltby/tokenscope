@@ -37,7 +37,7 @@ import {
 import { SNAPSHOT_VERSION, enqueueSnapshotSave } from "../lib/viewSnapshot";
 import { errorText, isQueryExpired } from "../lib/queryError";
 import {
-  loadViewFilters,
+  loadViewFilterState,
   normalizeDrill,
   saveViewFilters,
   viewFiltersEqual,
@@ -198,7 +198,10 @@ function dayInTz(iso: string | null | undefined, tz: string): string | null {
 
 export function useUsageQuery(opts: UsageQueryOptions) {
   // ── 筛选偏好（决定"查什么"）────────────────────────────────
-  const initial: ViewFilters = loadViewFilters();
+  const initialState = loadViewFilterState();
+  const initial: ViewFilters = initialState.filters;
+  let legacyModel = initialState.legacyModel ? (initial.drill?.key ?? null) : null;
+  let applyingModelMigration = false;
   const by = ref<Dim>(initial.by);
   const agent = ref<AgentFilter>(initial.agent);
   const preset = ref<RangePreset | null>(initial.preset);
@@ -365,7 +368,8 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   }
 
   function persistFilters(): void {
-    saveViewFilters(preferenceSnapshot());
+    // 主筛选在迁移完成前变化，仍保留旧键标记；不能提前把未经确认的键标为新版。
+    saveViewFilters(preferenceSnapshot(), legacyModel ? 0 : undefined);
   }
 
   // ── 查询会话与两条查询 ────────────────────────────────────
@@ -484,7 +488,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     }
     const seq = ++eventsSeq;
     const epoch = refreshEpoch;
-    const captured = eventIdentity();
+    let captured = eventIdentity();
     const anchor = append ? (events.value?.rows.at(-1)?.cursor ?? null) : null;
     if (!append) eventsLoading.value = true;
     moreLoading.value = append;
@@ -498,6 +502,8 @@ export function useUsageQuery(opts: UsageQueryOptions) {
         eventsError.value = summaryError.value;
         return;
       }
+      const migrateLegacyModel =
+        !append && captured.drill?.type === "model" && legacyModel === captured.drill.key;
       const list = await invoke<EventList>("query_events", {
         queryId: h.queryId,
         model: captured.drill?.type === "model" ? captured.drill.key : null,
@@ -505,9 +511,40 @@ export function useUsageQuery(opts: UsageQueryOptions) {
         day: captured.drill?.type === "day" ? captured.drill.key : null,
         limit: EVENTS_PAGE_SIZE,
         before: anchor,
+        ...(migrateLegacyModel ? { migrateLegacyModel: true } : {}),
       });
       if (seq !== eventsSeq || disposed) return;
       if (h.queryId !== currentQuery.value?.queryId) return; // 旧会话响应不落地
+      if (migrateLegacyModel) {
+        if (
+          !sameMainIdentity(captured, eventIdentity()) ||
+          batchRollups !== rollupsMode.value ||
+          h.timezone !== resolvedTzId(tz.value)
+        )
+          return;
+        const migration = list.model_filter_migration;
+        const previous = captured.drill;
+        if (
+          !migration ||
+          !previous ||
+          previous.type !== "model" ||
+          migration.from !== previous.key
+        ) {
+          throw new Error("model_filter_migration: invalid response");
+        }
+        const next = migration.to ? { ...previous, key: migration.to } : null;
+        legacyModel = null;
+        applyingModelMigration = true;
+        try {
+          drill.value = next;
+          persistFilters();
+          await nextTick();
+        } finally {
+          applyingModelMigration = false;
+        }
+        if (seq !== eventsSeq || disposed || epoch !== refreshEpoch) return;
+        captured = { ...captured, drill: next };
+      }
       if (append && events.value) {
         stagedEvents = { ...list, rows: [...events.value.rows, ...list.rows] };
         // U06：本会话已有续页内容——自动刷新会作废它，改走翻页保护提示。
@@ -1357,6 +1394,9 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   });
   /// 下钻是同一 query_id 内的明细子查询：可见时重扫明细，隐藏时合并到待刷新。
   watch(drill, () => {
+    if (applyingModelMigration) return;
+    // 用户主动选择的新筛选不再属于待迁移的旧偏好。
+    legacyModel = null;
     persistFilters();
     if (!visible.value) {
       pendingRefresh.value = true;
@@ -1424,7 +1464,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     try {
       const cached = await invoke<SnapshotPayload | null>("view_cache_load");
       // R04：晚到的缓存不得覆盖已落地的新结果；卸载实例同样不恢复。
-      if (disposed || report.value || events.value) return;
+      if (disposed || legacyModel || report.value || events.value) return;
       // 只接受当前版快照；旧版本可能含混代数据，一律走正常加载。
       if (!cached || cached.v !== SNAPSHOT_VERSION || !cached.report || !cached.filters) return;
       const restored: ViewFilters = {

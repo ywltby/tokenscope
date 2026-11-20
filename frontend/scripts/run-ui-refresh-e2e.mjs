@@ -25,7 +25,7 @@ try {
       "--viewport",
       "1280x820,980x620",
       "--contract",
-      "ui_refresh_lifecycle,ui_refresh_clock,ui_adjustment_shapes,segmented_cold_start_highlight,ui_date_keyboard_matrix,ui_control_material,source_paths_management_contract,settings_about_contract,boot_stall_recovery,ui_chart_transition_preserves_animation,model_chart_readable_rows,summary_chart_survives_hidden_rebuild,cost_cell_layout_not_concatenated,cost_display_consolidation,rollup_drilldown_rows,confirmed_model_stats_grouping",
+      "ui_refresh_lifecycle,ui_refresh_clock,ui_adjustment_shapes,segmented_cold_start_highlight,ui_date_keyboard_matrix,ui_control_material,source_paths_management_contract,settings_about_contract,boot_stall_recovery,ui_chart_transition_preserves_animation,model_chart_readable_rows,summary_chart_survives_hidden_rebuild,cost_cell_layout_not_concatenated,cost_display_consolidation,rollup_drilldown_rows,confirmed_model_stats_grouping,saved_model_drill_migration",
       "--output",
       "qa-artifacts/ui-adjustment/ci-e2e",
     ],

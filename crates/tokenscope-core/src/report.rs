@@ -3317,6 +3317,13 @@ fn build_rollup_event_row(
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ModelFilterMigration {
+    pub from: String,
+    /// None = 无法唯一确认旧键，仅移除模型下钻，不改主筛选。
+    pub to: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct EventList {
     /// SF04：所属查询会话（分页必须携带同一 query_id）。
     pub query_id: String,
@@ -3326,6 +3333,9 @@ pub struct EventList {
     /// 过滤后、截断前的总条数（同一快照内恒定）。
     pub total: u64,
     pub warnings: Vec<String>,
+    /// 只在显式请求旧偏好迁移的首页出现；普通筛选及分页不执行兼容匹配。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_filter_migration: Option<ModelFilterMigration>,
 }
 
 /// SF04：从查询快照分页读取明细——下钻在固定行序上应用，游标 v2 校验
@@ -3436,6 +3446,7 @@ pub(crate) fn query_events_from(
         rows,
         total,
         warnings: snapshot.warnings(),
+        model_filter_migration: None,
     })
 }
 

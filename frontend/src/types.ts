@@ -476,6 +476,8 @@ export interface EventList {
   rows: EventRow[];
   total: number;
   warnings: string[];
+  /** 仅旧偏好的显式迁移首页返回；null 目标表示清除该条模型下钻。 */
+  model_filter_migration?: { from: string; to: string | null };
 }
 
 export interface EventDrill {

@@ -685,3 +685,257 @@ fn stats_metadata_survives_restart_without_rebuilding_price_index() {
         }
     }
 }
+
+#[test]
+fn invalid_modelsdev_version_cannot_supply_aliases_on_cold_or_index_load() {
+    const STAGE: &str = "TOKENSCOPE_INVALID_ALIAS_STAGE";
+    const ROOT: &str = "TOKENSCOPE_INVALID_ALIAS_ROOT";
+    const TEST: &str = "invalid_modelsdev_version_cannot_supply_aliases_on_cold_or_index_load";
+    if let Ok(stage) = std::env::var(STAGE) {
+        let root = PathBuf::from(std::env::var_os(ROOT).expect("必须提供隔离根"));
+        let (p, _, warnings, hit) = Pricing::load_cached_revision(
+            None,
+            Some(&root.join("md.json")),
+            None,
+            &root.join("index.json"),
+        );
+        assert_eq!(hit, stage == "restart");
+        assert!(
+            warnings.iter().any(|w| w.contains("models.dev")),
+            "无效 v 必须仍有加载警告"
+        );
+        assert_eq!(
+            p.model_stats_key(GEMMA_FREE),
+            "google/gemma426ba4bit:free",
+            "有加载警告的无效快照不可贡献别名：{stage}"
+        );
+        assert_ne!(p.model_stats_key(GEMMA_FREE), p.model_stats_key(GEMMA));
+        assert_eq!(p.model_stats_key("hy3"), p.model_stats_key(HY3_FREE));
+        assert_eq!(
+            p.model_stats_key("claude-fable-5-2"),
+            p.model_stats_key("anthropic/claude-fable-5.2")
+        );
+        return;
+    }
+    let f = Fixture::new();
+    std::fs::write(f.root.join("md.json"), json!({"v":"nonsense", "synced_at":"synthetic", "entries":[
+        {"id":format!("openrouter/{GEMMA}"), "canonical_model_id":GEMMA, "input":2.0,"output":5.0},
+        {"id":format!("openrouter/{GEMMA_FREE}"), "canonical_model_id":GEMMA,"input":0.0,"output":0.0}
+    ]}).to_string()).unwrap();
+    let mut failed = Vec::new();
+    for stage in ["cold", "restart"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(STAGE, stage)
+            .env(ROOT, &f.root)
+            .output()
+            .unwrap();
+        if !output.status.success() {
+            failed.push(format!(
+                "{stage}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+#[test]
+fn space_bunny_legacy_key_reproduction_uses_a_frozen_synthetic_query() {
+    let f = Fixture::new();
+    f.write_modelsdev(
+        json!([{"id":"opencode-go/spacebunny","name":"Space Bunny","input":1.0,"output":2.0}]),
+    );
+    f.write_claude(&[claude(
+        "space",
+        "2026-05-28T01:00:00Z",
+        "spacebunny",
+        [100, 20, 0, 0],
+    )]);
+    let h = begin_query(&f.opts).unwrap();
+    let read = |key: &str| {
+        query_events(
+            &h.query_id,
+            &EventFilter {
+                model: Some(key.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    assert_eq!(read("opencodego/spacebunny").total, 0);
+    assert_eq!(read("spacebunny").total, 1);
+    let migrated = tokenscope::query::query_events_with_legacy_model(
+        &h.query_id,
+        &EventFilter {
+            model: Some("opencodego/spacebunny".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(migrated.total, 1);
+    assert_eq!(
+        migrated.model_filter_migration.unwrap().to.as_deref(),
+        Some("spacebunny")
+    );
+    assert_eq!(
+        read("opencodego/spacebunny").total,
+        0,
+        "普通查询仍严格匹配，不引入旧键兼容"
+    );
+}
+
+#[test]
+fn legacy_model_migration_distinguishes_empty_dates_and_uses_frozen_relations() {
+    let f = Fixture::new();
+    f.write_modelsdev(
+        json!([{"id":"opencode-go/spacebunny","name":"Space Bunny","input":1.0,"output":2.0}]),
+    );
+    let native = claude(
+        "space",
+        "2026-05-28T01:00:00Z",
+        "spacebunny",
+        [100, 20, 0, 0],
+    );
+    f.write_claude(std::slice::from_ref(&native));
+    let empty = begin_query(&SummaryOptions {
+        from: Some(PRIOR_DAY.into()),
+        to: Some(PRIOR_DAY.into()),
+        ..f.opts.clone()
+    })
+    .unwrap();
+    // 新请求令旧键歧义，但不能改变此前已冻结的关系。
+    f.write_claude(&[
+        native,
+        claude(
+            "prefixed",
+            "2026-05-28T02:00:00Z",
+            "opencode-go/spacebunny",
+            [100, 20, 0, 0],
+        ),
+    ]);
+    let current = begin_query(&f.opts).unwrap();
+    let filter = EventFilter {
+        model: Some("opencodego/spacebunny".into()),
+        ..Default::default()
+    };
+    let old = tokenscope::query::query_events_with_legacy_model(&empty.query_id, &filter).unwrap();
+    assert_eq!(old.total, 0);
+    assert_eq!(
+        old.model_filter_migration.unwrap().to.as_deref(),
+        Some("spacebunny"),
+        "日期为空不是旧键失效"
+    );
+    let ambiguous =
+        tokenscope::query::query_events_with_legacy_model(&current.query_id, &filter).unwrap();
+    assert_eq!(
+        ambiguous.total, 2,
+        "歧义只清模型过滤，正常返回原主筛选的明细"
+    );
+    assert!(ambiguous.model_filter_migration.unwrap().to.is_none());
+    let missing = tokenscope::query::query_events_with_legacy_model(
+        &current.query_id,
+        &EventFilter {
+            model: Some("no/such-model".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(missing.total, 2);
+    assert!(missing.model_filter_migration.unwrap().to.is_none());
+    assert!(
+        tokenscope::query::query_events_with_legacy_model(
+            &current.query_id,
+            &EventFilter {
+                before: Some(ambiguous.rows[0].cursor.clone()),
+                ..filter
+            }
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn malformed_optional_alias_keeps_prices_and_old_snapshot_compatibility() {
+    let f = Fixture::new();
+    for version in [1, 3, 4] {
+        std::fs::write(f.root.join("md.json"), json!({"v":version,"synced_at":"synthetic","entries":[
+            {"id":format!("openrouter/{GEMMA}"),"name":"Gemma","input":2.0,"output":5.0,"cache_read":0.0,"canonical_model_id":GEMMA},
+            {"id":format!("openrouter/{GEMMA_FREE}"),"name":"Gemma free","input":0.0,"output":0.0,"cache_read":0.0,"canonical_model_id":false}
+        ]}).to_string()).unwrap();
+        let (p, warnings) = Pricing::load(None, f.opts.modelsdev_path.as_deref(), None);
+        assert!(warnings.is_empty(), "可选字段坏值不影响其余费率");
+        assert_eq!(p.modelsdev_count(), 2);
+        assert_ne!(p.model_stats_key(GEMMA), p.model_stats_key(GEMMA_FREE));
+        let t = TokenCounts {
+            input: 1000,
+            output: 200,
+            ..Default::default()
+        };
+        let at = "2026-05-28T01:00:00Z".parse().unwrap();
+        close(p.estimate(GEMMA, &t, at).unwrap().cost, 0.003);
+        assert_eq!(p.estimate(GEMMA_FREE, &t, at).unwrap().cost, 0.0);
+        if version < 4 {
+            assert!(p.display_name_for(GEMMA).is_none(), "保留旧版名称降级");
+        }
+        let rate = p.lookup(GEMMA).unwrap().plan.base.cache_read;
+        assert_eq!(
+            rate,
+            if version == 1 {
+                tokenscope::pricing::RateSpec::Unknown
+            } else {
+                tokenscope::pricing::RateSpec::Fixed(0.0)
+            }
+        );
+    }
+}
+
+#[test]
+fn migrated_first_page_cursor_resumes_with_the_new_key_only() {
+    let f = Fixture::new();
+    f.write_modelsdev(
+        json!([{"id":"opencode-go/spacebunny","name":"Space Bunny","input":1.0,"output":2.0}]),
+    );
+    f.write_claude(&[
+        claude(
+            "space-1",
+            "2026-05-28T01:00:00Z",
+            "spacebunny",
+            [100, 20, 0, 0],
+        ),
+        claude(
+            "space-2",
+            "2026-05-28T02:00:00Z",
+            "spacebunny",
+            [200, 40, 0, 0],
+        ),
+    ]);
+    let h = begin_query(&f.opts).unwrap();
+    let first = tokenscope::query::query_events_with_legacy_model(
+        &h.query_id,
+        &EventFilter {
+            model: Some("opencodego/spacebunny".into()),
+            limit: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(first.total, 2);
+    let second = query_events(
+        &h.query_id,
+        &EventFilter {
+            model: Some("spacebunny".into()),
+            limit: Some(1),
+            before: Some(first.rows[0].cursor.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(second.rows.len(), 1);
+    assert_ne!(first.rows[0].record_id, second.rows[0].record_id);
+    assert!(
+        second.model_filter_migration.is_none(),
+        "普通续页不重复迁移"
+    );
+}

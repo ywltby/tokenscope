@@ -273,6 +273,7 @@ pub async fn query_summary(
 }
 
 /// SF04：从会话快照分页读取明细；游标校验 query_id/指纹/行位置归属。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn query_events(
     app: tauri::AppHandle,
@@ -282,6 +283,7 @@ pub async fn query_events(
     day: Option<String>,
     limit: Option<usize>,
     before: Option<String>,
+    migrate_legacy_model: Option<bool>,
 ) -> Result<EventList, String> {
     privacy::require_ready(&privacy::state_of(&app))?;
     let filter = EventFilter {
@@ -292,7 +294,11 @@ pub async fn query_events(
         before,
     };
     run_blocking("query_events", move || {
-        tokenscope::query::query_events(&query_id, &filter)
+        if migrate_legacy_model == Some(true) {
+            tokenscope::query::query_events_with_legacy_model(&query_id, &filter)
+        } else {
+            tokenscope::query::query_events(&query_id, &filter)
+        }
     })
     .await
 }
