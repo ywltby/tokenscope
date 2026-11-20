@@ -17,6 +17,7 @@ import { uiDateKeyboardMatrix } from "./ui-date-keyboard-contract.mjs";
 import { uiControlMaterial } from "./ui-control-material-contract.mjs";
 import { bootStallRecovery } from "./ui-boot-stall-contract.mjs";
 import { uiChartTransition } from "./ui-chart-transition-contract.mjs";
+import { uiModelRows } from "./ui-model-rows-contract.mjs";
 
 import { FIXTURE_APP_VERSION, PRIVACY_PROTECTED_COMMANDS } from "../fixtures/ui-contracts.mjs";
 import { captureContractFailure, trackSession } from "../lib/contract-failure.mjs";
@@ -43,6 +44,7 @@ export const REQUIRED_CONTRACTS = [
   "chart_scroll_and_zoom_survive_supported_updates",
   // F02：布局/数据同批更新后，真实 ECharts 柱形必须保留中间帧（不是首帧终态）。
   "ui_chart_transition_preserves_animation",
+  "model_chart_readable_rows",
   "real_app_scroll_keeps_navigation_visible",
   "prepaint_theme_has_correct_canvas",
   // AP08 扩充失败反例（写出失败的写、晚到的失败读、来源检测失败、定价 DTO 分态）
@@ -332,6 +334,7 @@ const IMPL = {
   ui_refresh_clock: uiRefreshClock,
   boot_stall_recovery: bootStallRecovery,
   ui_chart_transition_preserves_animation: uiChartTransition,
+  model_chart_readable_rows: uiModelRows,
   async large_pricing_does_not_block_settings_navigation(ctx) {
     const name = "large_pricing_does_not_block_settings_navigation";
     const session = await ctx.open({ fixture: "large-pricing", viewport: VIEWPORTS.desktop });
@@ -1760,7 +1763,7 @@ const IMPL = {
           `${dimension}标题与自适应尺寸`,
           (await page.locator(".chart-title").textContent()) === title &&
             metrics.scrollWidth <= metrics.width + 1 &&
-            metrics.height <= 500 &&
+            (dimension === "按模型" ? metrics.height >= 30 * 24 + 80 : metrics.height <= 500) &&
             metrics.scrollHeight <= metrics.height + 1,
           JSON.stringify(metrics),
         );

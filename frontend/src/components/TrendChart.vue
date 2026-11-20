@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 设计系统 Task 4：趋势图接入统一图表主题（固定语义色/顺序，禁用默认
-// 调色板），类别多时高度封顶并保留图内滚动。
+// 调色板）；模型图按当前可见类别预留逐行空间，其他维度保持总览布局。
 // 聚合口径不变：分类与 series 仍由 buildBarChartData 单源生成（F03）。
 //
 // UX05（界面审查修复）：实例生命周期与数据更新分离——
@@ -63,6 +63,7 @@ let pending: PendingAction | null = null;
 let disposed = false;
 
 const isDay = computed(() => props.by === "day");
+const chartData = computed(() => buildBarChartData(props.groups, props.by));
 const titleText = computed(
   () =>
     ({
@@ -73,9 +74,23 @@ const titleText = computed(
     })[props.by] ?? t("dashboard.chartFallback"),
 );
 
-/// 画布始终适配容器；类别增多只调整轴标签密度，不撑开页面。
-function canvasHeight(count: number): number {
-  return isDay.value ? 360 : Math.min(480, Math.max(320, count * 30 + 70));
+/// 模型逐行至少 24 CSS px；80px 留给上下 grid 与数值轴标签。
+/// 用实际类别的离散边界（含两端）计数，不用 count * 百分比估算。
+function canvasHeight(zoom: ZoomRange): number {
+  const count = chartData.value.categories.length;
+  if (props.by !== "model") {
+    return isDay.value ? 360 : Math.min(480, Math.max(320, count * 30 + 70));
+  }
+  const last = Math.max(0, count - 1);
+  const start = zoom.startValue ?? Math.round((last * zoom.start) / 100);
+  const end = zoom.endValue ?? Math.round((last * zoom.end) / 100);
+  // 数据变少时 ECharts 把 value 窗口整体平移进新 extent（保留跨度），不是
+  // 分别截断两端；行数只限于新类别总数，避免随后 observer 再次改高打断动画。
+  const visible = Math.min(
+    count,
+    Math.max(0, Math.floor(Math.max(start, end)) - Math.ceil(Math.min(start, end)) + 1),
+  );
+  return Math.max(320, visible * 24 + 80);
 }
 
 function categoryLabelWidth(): number {
@@ -105,9 +120,16 @@ type ZoomRange = {
   endValue?: number;
   rangeMode?: ["value", "value"];
 };
+type ZoomOption = Omit<Partial<ZoomRange>, "rangeMode">;
+// getOption 的 rangeMode 是初始化配置，用户缩放后未必反映实际端点模式。
+// 从本组件下发的初始值及公开 datazoom 事件维护模式，不依赖 ECharts 内部模型。
+let zoomMode: ["value" | "percent", "value" | "percent"] = ["percent", "percent"];
+function dataZoomOption(): ZoomOption {
+  const option = chart?.getOption() as { dataZoom?: ZoomOption[] } | undefined;
+  return option?.dataZoom?.[0] ?? {};
+}
 function captureZoom(): ZoomRange {
-  const option = chart?.getOption() as { dataZoom?: Partial<ZoomRange>[] } | undefined;
-  const range = option?.dataZoom?.[0];
+  const range = dataZoomOption();
   return {
     start: range?.start ?? 0,
     end: range?.end ?? 100,
@@ -120,15 +142,48 @@ function captureZoom(): ZoomRange {
       : {}),
   };
 }
+/// 数据尚未 setOption 时，旧 getOption 的 value 属于旧类别集合。百分比模式
+/// 必须按新类别总数投影；显式 value 模式（主题重建后）仍保持原索引。
+function zoomForNewData(): ZoomRange {
+  const range = dataZoomOption();
+  return {
+    start: range.start ?? 0,
+    end: range.end ?? 100,
+    ...(zoomMode[0] === "value" ? { startValue: range.startValue } : {}),
+    ...(zoomMode[1] === "value" ? { endValue: range.endValue } : {}),
+  };
+}
 function resetZoom(): void {
   chart?.dispatchAction({ type: "dataZoom", start: 0, end: 100 });
+}
+
+/// ECharts 的 inside roam 在检查 Ctrl 之前会消费 wheel。捕获阶段只隔离
+/// 普通滚轮，不 preventDefault，保留浏览器原生页面滚动；Ctrl 仍交给图表。
+function passPageWheel(event: WheelEvent): void {
+  if (!event.ctrlKey) event.stopPropagation();
+}
+
+function bindZoomLayout(zoom: ZoomRange = { start: 0, end: 100 }): void {
+  zoomMode = [
+    zoom.startValue == null ? "percent" : "value",
+    zoom.endValue == null ? "percent" : "value",
+  ];
+  chart?.on("datazoom", (payload: unknown) => {
+    const event = payload as ZoomOption & { batch?: ZoomOption[] };
+    const range = event.batch?.[0] ?? event;
+    if (range.start != null) zoomMode[0] = "percent";
+    else if (range.startValue != null) zoomMode[0] = "value";
+    if (range.end != null) zoomMode[1] = "percent";
+    else if (range.endValue != null) zoomMode[1] = "value";
+    if (props.by === "model") flushChart("layout");
+  });
 }
 
 function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsOption {
   const t = chartTokens(mode.value, overrides.value);
   const groups = props.groups;
   // F03（计划 A4）：分类轴与全部 series 由同一份排序结果生成，标签与数值不错位
-  const { categories, series } = buildBarChartData(groups, props.by);
+  const { categories, series } = chartData.value;
   // 长标签：轴上省略，tooltip 用展示名（模型维度不能用压缩后的身份键）
   const full = tooltipLabels(groups, props.by);
   // SF01：tooltip 安全输出——返回 HTMLElement（DOM 分支），原始键只经
@@ -194,14 +249,14 @@ function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsO
       : {
           type: "category",
           inverse: true,
-          // 标签密度随视口与缩放范围自适应；完整名称见 tooltip。
+          // 模型逐行保留标签；项目/应用保持原有密度规则，完整名称见 tooltip。
           data: categories,
           axisLine: { show: false },
           axisLabel: {
             color: t.textMuted,
             fontSize: 12,
-            interval: "auto",
-            hideOverlap: true,
+            interval: props.by === "model" ? 0 : "auto",
+            hideOverlap: props.by !== "model",
             width: categoryLabelWidth(),
             formatter: formatCategoryLabel,
             overflow: "truncate",
@@ -272,9 +327,9 @@ function containerMeasurable(): boolean {
 }
 
 /// 应用目标高度并量测实际尺寸；只在可测量容器上调用。
-function applyHeight(): { width: number; height: number } {
+function applyHeight(zoom: ZoomRange = captureZoom()): { width: number; height: number } {
   if (!el.value) return { width: appliedWidth, height: appliedHeight };
-  const target = canvasHeight(props.groups.length);
+  const target = canvasHeight(zoom);
   el.value.style.height = `${target}px`;
   el.value.style.minWidth = "0px";
   return {
@@ -307,10 +362,17 @@ function flushChart(kind: PendingKind): void {
     initChart();
     return;
   }
-  const size = applyHeight();
+  const size = applyHeight(
+    kind === "dimension"
+      ? { start: 0, end: 100 }
+      : kind === "data"
+        ? zoomForNewData()
+        : captureZoom(),
+  );
   const resized = resizeIfNeeded(size);
   if (kind === "dimension") {
     chart.setOption(buildOption(), { notMerge: true });
+    zoomMode = ["percent", "percent"];
   } else if (kind === "data") {
     // 同维更新不要重新下发百分比范围，否则离散类别边界会再次取整而漂移。
     const option = buildOption();
@@ -348,7 +410,7 @@ function initChart(): void {
     recordPending({ kind: "layout" });
     return;
   }
-  const size = applyHeight();
+  const size = applyHeight({ start: 0, end: 100 });
   chart = echarts.init(el.value, null, {
     renderer: "svg",
     width: size.width || undefined,
@@ -357,6 +419,7 @@ function initChart(): void {
   appliedWidth = size.width;
   appliedHeight = size.height;
   chart.setOption(buildOption(), { notMerge: true });
+  bindZoomLayout();
 }
 
 /// 同维度数据更新：merge（保留滚动位置、不重建实例）。
@@ -399,7 +462,7 @@ function rebuildForTheme(): void {
   const zoom = captureZoom();
   chart?.dispose();
   chart = null;
-  const size = applyHeight();
+  const size = applyHeight(zoom);
   chart = echarts.init(el.value, null, {
     renderer: "svg",
     width: size.width || undefined,
@@ -408,6 +471,7 @@ function rebuildForTheme(): void {
   appliedWidth = size.width;
   appliedHeight = size.height;
   chart.setOption(buildOption(zoom), { notMerge: true });
+  bindZoomLayout(zoom);
 }
 
 /// v0.9.1（缺陷 A）：页面重新可见后的恢复。
@@ -432,7 +496,7 @@ function maybeRestore(): void {
     const zoom = action.zoom;
     chart.dispose();
     chart = null;
-    const size = applyHeight();
+    const size = applyHeight(zoom);
     chart = echarts.init(el.value, null, {
       renderer: "svg",
       width: size.width || undefined,
@@ -441,6 +505,7 @@ function maybeRestore(): void {
     appliedWidth = size.width;
     appliedHeight = size.height;
     chart.setOption(buildOption(zoom), { notMerge: true });
+    bindZoomLayout(zoom);
     return;
   }
   // 无重建：尺寸核对（真实容器 vs 已应用 vs 实例输出）。
@@ -575,6 +640,7 @@ watch(overrides, () => chart?.setOption({ color: legendItems.value.map((s) => s.
         style="width: 100%; height: 320px"
         role="img"
         :aria-label="titleText"
+        @wheel.capture="passPageWheel"
       />
       <button class="ts-btn ts-btn-sm chart-reset" type="button" @click="resetZoom">
         {{ t("dashboard.chartResetZoom") }}

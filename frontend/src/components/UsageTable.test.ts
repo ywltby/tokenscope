@@ -40,6 +40,36 @@ function report(groups: Group[], totalsUnknown: boolean): SummaryReport {
   };
 }
 
+describe("模型行无箭头且保留筛选交互", () => {
+  it("行内只有展示名，点击/Enter/Space 发身份键；费用按钮不发筛选", async () => {
+    const g = { ...group("canonical-model-key"), label: "Readable Model 5.2" };
+    const w = mount(UsageTable, {
+      props: { report: report([g], false) },
+      attachTo: document.body,
+    });
+    try {
+      const row = w.find("tbody tr");
+      expect(row.find("td").text()).toBe("Readable Model 5.2");
+      expect(row.attributes("aria-label")).toContain("Readable Model 5.2");
+      await row.find("td").trigger("click");
+      await row.trigger("keydown", { key: "Enter" });
+      await row.trigger("keydown", { key: " " });
+      expect(w.emitted("row-click")).toEqual(Array(3).fill(["canonical-model-key"]));
+      const button = row.find(".gcb-trigger");
+      await button.trigger("click");
+      for (const key of ["Enter", " "]) {
+        const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+        button.element.dispatchEvent(event);
+        expect(event.defaultPrevented).toBe(false);
+      }
+      expect(w.emitted("row-click")).toHaveLength(3);
+      expect(button.attributes("aria-describedby")).toBeTruthy();
+    } finally {
+      w.unmount();
+    }
+  });
+});
+
 describe("UsageTable 费用列单金额（v0.9.2）", () => {
   function costMain(group: Group, totalsUnknown = false): string {
     const w = mount(UsageTable, {
