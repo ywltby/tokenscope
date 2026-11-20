@@ -35,7 +35,7 @@ const columns = computed<DataTableColumn[]>(() => {
     title: DIM_LABEL()[props.report.by] ?? t("dashboard.colDim"),
     key: "key",
     // C2：项目身份是完整路径，展示用 label（末段），悬浮可见完整 key。
-    // 任务 5：可点击行右侧 › 指示（合计行不可点，不带）。
+    // 模型行只展示名称；其他可点击维度保留 ›，行激活与名称语义不变。
     render: (row) => {
       const g = asGroup(row);
       const isTotal = g.key === TOTAL_ROW_KEY;
@@ -43,7 +43,9 @@ const columns = computed<DataTableColumn[]>(() => {
       // `合计`（行样式、事件分流与下钻匹配都用它，绝不翻译）。
       return h("span", { class: "dim-cell" }, [
         isTotal ? t("dashboard.totalRow") : (g.label ?? g.key),
-        ...(isTotal ? [] : [h("span", { class: "drill-arrow", "aria-hidden": "true" }, " ›")]),
+        ...(isTotal || props.report.by === "model"
+          ? []
+          : [h("span", { class: "drill-arrow", "aria-hidden": "true" }, " ›")]),
       ]);
     },
   };

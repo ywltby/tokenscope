@@ -1,4 +1,4 @@
-// 设计系统 Task 4 + UX05：TrendChart 主题接入、高度上限、可访问摘要，
+// 设计系统 Task 4 + UX05：TrendChart 主题接入、逐行模型图/其他维度高度上限，
 // 以及实例生命周期与数据更新分离（不因无关父级更新重建；同维度 merge 保留
 // zoom；维度切换完整替换；主题切换一次 dispose/init；0 类别不建实例）。
 // echarts 全 mock（happy-dom 无 canvas），ResizeObserver 打桩。
@@ -12,6 +12,7 @@ const echartsMock = vi.hoisted(() => {
   const resize = vi.fn();
   const getOption = vi.fn((): unknown => ({}));
   const dispatchAction = vi.fn();
+  const on = vi.fn();
   const getWidth = vi.fn((): number => 0);
   const getHeight = vi.fn((): number => 0);
   const init = vi.fn((..._args: unknown[]) => ({
@@ -22,8 +23,9 @@ const echartsMock = vi.hoisted(() => {
     dispatchAction,
     getWidth,
     getHeight,
+    on,
   }));
-  return { setOption, dispose, resize, getOption, dispatchAction, init, getWidth, getHeight };
+  return { setOption, dispose, resize, getOption, dispatchAction, init, getWidth, getHeight, on };
 });
 
 const resizeObservers = vi.hoisted(() => [] as ResizeObserverCallback[]);
@@ -73,6 +75,7 @@ beforeEach(() => {
   echartsMock.getWidth.mockReturnValue(0);
   echartsMock.getHeight.mockReturnValue(0);
   init.mockClear();
+  echartsMock.on.mockClear();
   resizeObservers.length = 0;
   vi.stubGlobal("ResizeObserver", TestResizeObserver);
   localStorage.removeItem("tokenscope-theme");
@@ -201,32 +204,29 @@ describe("TrendChart（设计系统 Task 4）", () => {
     w.unmount();
   });
 
-  it.each(["model", "project", "agent"])(
-    "%s 保留全部类别且画布高度封顶，提供显式缩放",
-    async (by) => {
-      const many = Array.from({ length: 50 }, (_, i) => group(`model-${i}`, 50 - i));
-      const w = mount(TrendChart, { props: { groups: many, by } });
-      await flushPromises();
-      const opt = setOption.mock.calls[0][0] as {
-        dataZoom?: unknown[];
-        yAxis: { data: string[] };
-      };
-      expect(opt.dataZoom).toHaveLength(2);
-      expect(opt.yAxis.data).toHaveLength(50);
-      const h2 = Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.height, 10);
-      expect(h2).toBeLessThanOrEqual(480);
-      // v0.9.1 缺陷 A：init 显式传容器尺寸（隐藏期恢复必须按真实尺寸初始化，
-      // 不传会被 ECharts 量成 100px）。happy-dom 无布局 → clientWidth 为 0
-      // → width 为 undefined（与修复前一致）；真实容器下由浏览器契约断言
-      // 实际宽度（summary_chart_survives_hidden_rebuild）。
-      const initOpts = init.mock.calls[0][2] as { renderer: string; width?: number };
-      expect(initOpts.renderer).toBe("svg");
-      if (initOpts.width !== undefined) {
-        expect(initOpts.width).toBeGreaterThan(0);
-      }
-      w.unmount();
-    },
-  );
+  it.each(["project", "agent"])("%s 保留全部类别且画布高度封顶，提供显式缩放", async (by) => {
+    const many = Array.from({ length: 50 }, (_, i) => group(`model-${i}`, 50 - i));
+    const w = mount(TrendChart, { props: { groups: many, by } });
+    await flushPromises();
+    const opt = setOption.mock.calls[0][0] as {
+      dataZoom?: unknown[];
+      yAxis: { data: string[] };
+    };
+    expect(opt.dataZoom).toHaveLength(2);
+    expect(opt.yAxis.data).toHaveLength(50);
+    const h2 = Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.height, 10);
+    expect(h2).toBeLessThanOrEqual(480);
+    // v0.9.1 缺陷 A：init 显式传容器尺寸（隐藏期恢复必须按真实尺寸初始化，
+    // 不传会被 ECharts 量成 100px）。happy-dom 无布局 → clientWidth 为 0
+    // → width 为 undefined（与修复前一致）；真实容器下由浏览器契约断言
+    // 实际宽度（summary_chart_survives_hidden_rebuild）。
+    const initOpts = init.mock.calls[0][2] as { renderer: string; width?: number };
+    expect(initOpts.renderer).toBe("svg");
+    if (initOpts.width !== undefined) {
+      expect(initOpts.width).toBeGreaterThan(0);
+    }
+    w.unmount();
+  });
 
   it("保留图表画布，不提供数据摘要面板", async () => {
     const w = mount(TrendChart, {
@@ -298,6 +298,139 @@ describe("TrendChart 卡片化（设计系统 Task 5）", () => {
       expect(s.stack).toBe("tokens");
     }
     wModel.unmount();
+  });
+});
+
+describe("模型图逐行标签与可见行高", () => {
+  const models = (count: number) =>
+    Array.from({ length: count }, (_, i) => group(`model-${i}`, count - i));
+  const height = (w: ReturnType<typeof mount>) =>
+    Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.height, 10);
+  function zoom(
+    range: {
+      start?: number;
+      end?: number;
+      startValue?: number;
+      endValue?: number;
+      rangeMode?: string[];
+    },
+    event = range.rangeMode?.[0] === "value"
+      ? { startValue: range.startValue, endValue: range.endValue }
+      : { start: range.start, end: range.end },
+  ): void {
+    echartsMock.getOption.mockReturnValue({ dataZoom: [range] });
+    const listener = echartsMock.on.mock.calls.find(([name]) => name === "datazoom")?.[1];
+    expect(listener, "每次 init 都须接入 datazoom 布局更新").toBeTypeOf("function");
+    listener(event);
+  }
+
+  it("普通 wheel 不交给 ECharts 消费且不阻止默认滚动，Ctrl wheel 正常传入", () => {
+    const w = mount(TrendChart, { props: { groups: models(5), by: "model" } });
+    try {
+      const canvas = w.find(".chart-canvas").element;
+      const child = document.createElement("div");
+      canvas.appendChild(child);
+      const chartWheel = vi.fn();
+      child.addEventListener("wheel", chartWheel);
+      // happy-dom 的 WheelEvent 不实现 ctrlKey；用相同原生鼠标修饰键测捕获分流。
+      const ordinary = new MouseEvent("wheel", { bubbles: true, cancelable: true });
+      child.dispatchEvent(ordinary);
+      expect(chartWheel).not.toHaveBeenCalled();
+      expect(ordinary.defaultPrevented).toBe(false);
+      child.dispatchEvent(new MouseEvent("wheel", { bubbles: true, ctrlKey: true }));
+      expect(chartWheel).toHaveBeenCalledTimes(1);
+    } finally {
+      w.unmount();
+    }
+  });
+
+  it.each([5, 20, 40])("%i 个模型均保留标签，绘图区每行至少 24px", (count) => {
+    const w = mount(TrendChart, { props: { groups: models(count), by: "model" } });
+    try {
+      const option = setOption.mock.calls[0][0];
+      expect(height(w)).toBe(Math.max(320, count * 24 + 80));
+      expect(option.yAxis.axisLabel).toMatchObject({ interval: 0, hideOverlap: false });
+      expect(option.yAxis.data).toHaveLength(count);
+    } finally {
+      w.unmount();
+    }
+  });
+
+  it("按实际离散边界缩放收短，observer 不回写范围或重复 resize，显示全部恢复", async () => {
+    const w = mount(TrendChart, { props: { groups: models(40), by: "model" } });
+    try {
+      zoom({ start: 10, end: 60, startValue: 4, endValue: 23 });
+      expect(height(w)).toBe(20 * 24 + 80);
+      expect(echartsMock.resize).toHaveBeenCalledTimes(1);
+      const updates = setOption.mock.calls.length;
+      fireResize();
+      fireResize();
+      expect(echartsMock.resize).toHaveBeenCalledTimes(1);
+      expect(setOption.mock.calls.length).toBe(updates);
+      expect(setOption.mock.calls.slice(1).every(([option]) => !option.dataZoom)).toBe(true);
+      await w.find(".chart-reset").trigger("click");
+      // 真实 ECharts 的 dispatchAction 会同步发 datazoom；mock 单独触发。
+      zoom({ start: 0, end: 100, startValue: 0, endValue: 39 });
+      expect(height(w)).toBe(40 * 24 + 80);
+    } finally {
+      w.unmount();
+    }
+  });
+
+  it("value 模式数据减少保留窗口跨度，不把越界端分别截断", async () => {
+    const w = mount(TrendChart, { props: { groups: models(40), by: "model" } });
+    try {
+      zoom({ start: 10, end: 60, startValue: 4, endValue: 23, rangeMode: ["value", "value"] });
+      await w.setProps({ groups: models(20) });
+      expect(height(w)).toBe(20 * 24 + 80);
+    } finally {
+      w.unmount();
+    }
+  });
+
+  it("数据数目变化按新类别边界计数，主题重建沿用实际可见范围与行高", async () => {
+    const w = mount(TrendChart, { props: { groups: models(40), by: "model" } });
+    try {
+      zoom({ start: 0, end: 50, startValue: 0, endValue: 20 });
+      expect(height(w)).toBe(21 * 24 + 80);
+      await w.setProps({ groups: models(20) });
+      // 缺省百分比模式：20 类中 [0, round(19*0.5)] = 11 类，而不是 21 或 10。
+      expect(height(w)).toBe(Math.max(320, 11 * 24 + 80));
+      echartsMock.getOption.mockReturnValue({
+        dataZoom: [{ start: 0, end: 50, startValue: 0, endValue: 10 }],
+      });
+      useTheme().setPreference("dark");
+      await nextTick();
+      expect(height(w)).toBe(11 * 24 + 80);
+      expect(setOption.mock.calls.at(-1)![0].dataZoom[0]).toMatchObject({
+        startValue: 0,
+        endValue: 10,
+      });
+      expect(echartsMock.on.mock.calls.filter(([name]) => name === "datazoom")).toHaveLength(2);
+    } finally {
+      w.unmount();
+      useTheme().setPreference("system");
+    }
+  });
+
+  it("主题重建后的用户百分比缩放覆盖旧 rangeMode，后续筛选按新类目计高", async () => {
+    const w = mount(TrendChart, { props: { groups: models(40), by: "model" } });
+    try {
+      echartsMock.getOption.mockReturnValue({
+        dataZoom: [{ start: 0, end: 100, startValue: 0, endValue: 39 }],
+      });
+      useTheme().setPreference("dark");
+      await nextTick();
+      zoom(
+        { start: 0, end: 50, startValue: 0, endValue: 20, rangeMode: ["value", "value"] },
+        { start: 0, end: 50 },
+      );
+      await w.setProps({ groups: models(20) });
+      expect(height(w)).toBe(11 * 24 + 80);
+    } finally {
+      w.unmount();
+      useTheme().setPreference("system");
+    }
   });
 });
 

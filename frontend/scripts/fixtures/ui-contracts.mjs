@@ -1257,10 +1257,20 @@ function createSessionTable(cfg) {
  */
 export function buildFixture(name) {
   const cfg = SCENARIOS[name] ?? SCENARIOS.normal;
-  const rows = rowsFor(cfg.kind);
+  // 模型行高契约：展示名与身份键故意不同，数量只来自合成 fixture。
+  const modelGroups = cfg.modelCount
+    ? Array.from({ length: cfg.modelCount }, (_, i) => ({
+        ...group(`readable-model-${i}`, (cfg.modelCount - i) * 1000),
+        label: `Model ${String(i).padStart(2, "0")} / a-very-long-friendly-model-name-for-truncation`,
+      }))
+    : null;
+  const rows = modelGroups
+    ? modelGroups.map((g, i) => eventRow(i + 1, { model: g.key }))
+    : rowsFor(cfg.kind);
   const table = createSessionTable({
     rows,
-    groupsOf: (by, session) => dimGroups(cfg.kind, by, session),
+    groupsOf: (by, session) =>
+      by === "model" && modelGroups ? modelGroups : dimGroups(cfg.kind, by, session),
     pageSize: cfg.pageSize ?? 2,
     expireAfterPages: cfg.expireAfterPages ?? Infinity,
   });
@@ -1648,6 +1658,9 @@ const SCENARIOS = {
   // 行；此前全矩阵未在本地跑过，该缺口未被察觉。
   "long-text": { kind: "long", sourceRows: "merged" },
   "multi-category": { kind: "multi", pageSize: 4 },
+  "model-rows-5": { kind: "normal", modelCount: 5 },
+  "model-rows-20": { kind: "normal", modelCount: 20 },
+  "model-rows-40": { kind: "normal", modelCount: 40 },
   // RC09：设置首载失败 → 重试恢复全部依赖控件
   "settings-read-failure": { kind: "normal", settings: "fail-then-ok" },
   // RC09：真实浏览器重演"读取挂起 → 编辑 → 保存成功 → 释放旧读取"

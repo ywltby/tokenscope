@@ -552,12 +552,15 @@ public static class TsTrayControlledText {
     # OpenProcess(self) 可能失败，伪句柄由内核保证可用且语义明确（本进程）。
     $selfProc = [TsTray]::GetCurrentProcess()
     try {
-    # 1) 变长：短文本读出 → 原地改写为更长的文本（预分配 64 字符缓冲，同
+    # 1) 变长：短文本读出 → 原地改写为更长的文本（预分配完整读取容量，同
     #    指针，改写不越界）→ 再读 → 内容变化。模拟"同一按钮的文本在两次
     #    观察之间变长"，读取如实反映当次内存，不依赖任何长度比较协议。
     #    缓冲用 NUL 填充：ReadTextPointer 读到第一个 NUL 截断，因此两次读取
     #    的内容就是当次真实文本（21 字符 → 47 字符）。
-    $p = [TsTrayControlledText]::Alloc('TokenScope-AC10-short'.PadRight(64, [char]0))
+    # ReadTextPointer 固定读取 MaxTextBytes；仅分配 64 字符会跨越分配边界，
+    # 恰遇未映射页时 ReadProcessMemory 返回 false。只补足自测缓冲，不改解析器。
+    $variantBuffer = 'TokenScope-AC10-short'.PadRight([TsTray]::MaxTextBytes / 2, [char]0)
+    $p = [TsTrayControlledText]::Alloc($variantBuffer)
     try {
         $t1 = [TsTray]::ReadTextPointer($selfProc, $p, [TsTray]::MaxTextBytes, [ref]$null)
         [TsTrayControlledText]::Overwrite($p, 'TokenScope-AC10-short-now-much-longer-than-before')
@@ -593,6 +596,7 @@ public static class TsTrayControlledText {
     [pscustomobject]@{
         mode = 'self-test-controlled-text'
         max_bytes = [TsTray]::MaxTextBytes
+        variant_allocated_bytes = [System.Text.Encoding]::Unicode.GetByteCount($variantBuffer) + 2
         rows = $rows
         ok = (($rows | Where-Object { $_.case -eq 'variant-length' }).changed -eq $true -and
               ($rows | Where-Object { $_.case -eq 'over-long' }).bounded -eq $true -and

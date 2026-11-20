@@ -71,6 +71,9 @@ Write-Output 'PASS truncated button text is rejected'
 $controlled = & "$PSScriptRoot/read-tray-notification-area.ps1" -SelfTestControlledText
 if ($LASTEXITCODE -ne 0) { throw "self-test-controlled-text exited $LASTEXITCODE" }
 $controlled = $controlled | ConvertFrom-Json
+if ($controlled.variant_allocated_bytes -lt $controlled.max_bytes) {
+    throw "self-test-controlled-text fixture undersized: allocated=$($controlled.variant_allocated_bytes) read=$($controlled.max_bytes)"
+}
 if (-not $controlled.ok) {
     throw "self-test-controlled-text failed: $($controlled | ConvertTo-Json -Compress -Depth 5)"
 }

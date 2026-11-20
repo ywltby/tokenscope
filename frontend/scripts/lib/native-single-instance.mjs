@@ -435,13 +435,31 @@ export function webviewTransientTmpExempted(root, code, filePath) {
 }
 
 /**
+ * Runner 44673819099：SmartScreen RemoteData 的该缓存条目在 readdir 返回后、
+ * lstat 之前消失。只登记本次实际取证的完整相对路径，不扩为任意 WebView
+ * 文件/edgeSettings 版本。非 ENOENT 不豁免；存在时仍照常核对链接与硬链接。
+ */
+export function webviewSmartScreenCacheExempted(root, code, filePath) {
+  if (code !== "ENOENT") return false;
+  const rootKey = comparePath(root);
+  if (!rootKey) return false;
+  return (
+    comparePath(filePath) ===
+    comparePath(
+      path.join(root, "webview", "EBWebView", "SmartScreen", "RemoteData", "edgeSettings_2.0-0"),
+    )
+  );
+}
+
+/**
  * 走查两阶段共用的瞬时产物豁免：受控历史库 sidecar 或应用原子写临时文件。
  */
 export function transientArtifactExempted(root, code, filePath) {
   return (
     transientDbArtifactExempted(root, code, filePath) ||
     atomicWriteTmpExempted(root, code, filePath) ||
-    webviewTransientTmpExempted(root, code, filePath)
+    webviewTransientTmpExempted(root, code, filePath) ||
+    webviewSmartScreenCacheExempted(root, code, filePath)
   );
 }
 

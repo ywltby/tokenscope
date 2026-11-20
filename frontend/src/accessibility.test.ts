@@ -38,7 +38,7 @@ const setOption = vi.fn();
 const dispose = vi.fn();
 const resize = vi.fn();
 vi.mock("echarts", () => ({
-  init: vi.fn(() => ({ setOption, dispose, resize })),
+  init: vi.fn(() => ({ setOption, dispose, resize, on: vi.fn() })),
 }));
 
 vi.mock("./views/Dashboard.vue", () => ({
