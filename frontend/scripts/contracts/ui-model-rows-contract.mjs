@@ -16,38 +16,60 @@ async function click(page, locator) {
 
 async function geometry(page, theme) {
   // ECharts 默认 emphasis 通过 zrender liftColor(-0.1) 提亮输入色。
-  // 普通滚轮/移动鼠标不保证立即清除 hover；两种颜色都属于同一输入系列。
+  // 普通滚轮/移动鼠标不保证立即清除 hover；退场动画还会产生两端之间的
+  // 插值色。识别同一输入色到默认强调色的有界通道区间，而不是只认两端，
+  // 也不扩大到任意蓝色；几何/名称/数值的逐行断言仍全部保留。
+  const normal = color.parse(COLORS[theme]).slice(0, 3);
   const emphasis = color.parse(color.lift(COLORS[theme], -0.1));
-  const fills = [COLORS[theme], `rgb(${emphasis.slice(0, 3).join(", ")})`];
-  return page.locator(".chart-canvas svg").evaluate((svg, fills) => {
-    const center = (el) => {
-      const b = el.getBoundingClientRect();
-      return { y: b.y + b.height / 2, width: b.width, height: b.height };
-    };
-    const bars = [...svg.querySelectorAll("path")]
-      .filter((p) => fills.includes(getComputedStyle(p).fill))
-      .map(center)
-      .sort((a, b) => a.y - b.y);
-    const labels = [...svg.querySelectorAll("text")]
-      .filter((n) => /^Model \d\d/.test(n.textContent))
-      .map((el) => ({ text: el.textContent, ...center(el) }))
-      .sort((a, b) => a.y - b.y);
-    const pairs = bars.map((bar, i) => ({
-      label: labels[i]?.text,
-      error: labels[i] ? Math.abs(bar.y - labels[i].y) : null,
-      // 输入系列值降序，柱宽也须降序，不能仅有行数相等却名称错位。
-      width: bar.width,
-    }));
-    return {
-      height: svg.getBoundingClientRect().height,
-      width: svg.getBoundingClientRect().width,
-      bars: bars.length,
-      labels: labels.length,
-      minPitch: bars.length > 1 ? Math.min(...bars.slice(1).map((b, i) => b.y - bars[i].y)) : 0,
-      maxError: Math.max(0, ...pairs.map((p) => p.error ?? 9999)),
-      pairs,
-    };
-  }, fills);
+  return page.locator(".chart-canvas svg").evaluate(
+    (svg, { normal, emphasis }) => {
+      const center = (el) => {
+        const b = el.getBoundingClientRect();
+        return { y: b.y + b.height / 2, width: b.width, height: b.height };
+      };
+      const isInput = (p) => {
+        const components = /^rgba?\(([^)]+)\)$/
+          .exec(getComputedStyle(p).fill)?.[1]
+          .split(/[,\s/]+/)
+          .filter(Boolean)
+          .map(Number);
+        if (!components || (components.length === 4 && components[3] !== 1)) return false;
+        return normal.every(
+          (v, i) =>
+            components[i] >= Math.min(v, emphasis[i]) && components[i] <= Math.max(v, emphasis[i]),
+        );
+      };
+      const bars = [...svg.querySelectorAll("path")]
+        .filter(isInput)
+        .map(center)
+        .sort((a, b) => a.y - b.y);
+      const labels = [...svg.querySelectorAll("text")]
+        .filter((n) => /^Model \d\d/.test(n.textContent))
+        .map((el) => ({ text: el.textContent, ...center(el) }))
+        .sort((a, b) => a.y - b.y);
+      const pairs = bars.map((bar, i) => ({
+        label: labels[i]?.text,
+        error: labels[i] ? Math.abs(bar.y - labels[i].y) : null,
+        // 输入系列值降序，柱宽也须降序，不能仅有行数相等却名称错位。
+        width: bar.width,
+      }));
+      return {
+        pathFills: [...svg.querySelectorAll("path")].reduce((counts, p) => {
+          const fill = getComputedStyle(p).fill;
+          counts[fill] = (counts[fill] ?? 0) + 1;
+          return counts;
+        }, {}),
+        height: svg.getBoundingClientRect().height,
+        width: svg.getBoundingClientRect().width,
+        bars: bars.length,
+        labels: labels.length,
+        minPitch: bars.length > 1 ? Math.min(...bars.slice(1).map((b, i) => b.y - bars[i].y)) : 0,
+        maxError: Math.max(0, ...pairs.map((p) => p.error ?? 9999)),
+        pairs,
+      };
+    },
+    { normal, emphasis },
+  );
 }
 
 function recordRows(ctx, label, metrics, count, totalCount = count) {
@@ -191,6 +213,13 @@ export async function uiModelRows(ctx) {
               count,
             );
             await page.mouse.move(2, 2);
+            await page.waitForTimeout(50);
+            recordRows(
+              ctx,
+              `${count}/${theme}/${viewport.label} 强调色退场中间帧不漏计柱条`,
+              await geometry(page, theme),
+              count,
+            );
 
             if (count === 40) {
               // 持续采样高度，检查缩放与 observer 不出现 A→B→A 反复振荡。
