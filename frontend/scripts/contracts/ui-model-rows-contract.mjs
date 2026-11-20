@@ -1,5 +1,7 @@
 // 真实 SVG 几何验收：逐个标签与四桶堆叠柱的中心对齐，不以 option 代替绘制结果。
 // 所有写入式交互走真实鼠标/键盘；evaluate 仅测量和采样，不调用图表/组件方法。
+import { color } from "echarts";
+
 const CONTRACT = "model_chart_readable_rows";
 const COLORS = {
   light: "rgb(76, 141, 246)",
@@ -13,13 +15,17 @@ async function click(page, locator) {
 }
 
 async function geometry(page, theme) {
-  return page.locator(".chart-canvas svg").evaluate((svg, fill) => {
+  // ECharts 默认 emphasis 通过 zrender liftColor(-0.1) 提亮输入色。
+  // 普通滚轮/移动鼠标不保证立即清除 hover；两种颜色都属于同一输入系列。
+  const emphasis = color.parse(color.lift(COLORS[theme], -0.1));
+  const fills = [COLORS[theme], `rgb(${emphasis.slice(0, 3).join(", ")})`];
+  return page.locator(".chart-canvas svg").evaluate((svg, fills) => {
     const center = (el) => {
       const b = el.getBoundingClientRect();
       return { y: b.y + b.height / 2, width: b.width, height: b.height };
     };
     const bars = [...svg.querySelectorAll("path")]
-      .filter((p) => getComputedStyle(p).fill === fill)
+      .filter((p) => fills.includes(getComputedStyle(p).fill))
       .map(center)
       .sort((a, b) => a.y - b.y);
     const labels = [...svg.querySelectorAll("text")]
@@ -41,15 +47,19 @@ async function geometry(page, theme) {
       maxError: Math.max(0, ...pairs.map((p) => p.error ?? 9999)),
       pairs,
     };
-  }, COLORS[theme]);
+  }, fills);
 }
 
-function recordRows(ctx, label, metrics, count) {
+function recordRows(ctx, label, metrics, count, totalCount = count) {
   const names = metrics.pairs.map((p) => Number(/Model (\d\d)/.exec(p.label ?? "")?.[1]));
   const ordered = names.every(
     (id, i) => Number.isFinite(id) && (i === 0 || id === names[i - 1] + 1),
   );
   const widths = metrics.pairs.every((p, i) => i === 0 || p.width < metrics.pairs[i - 1].width);
+  const unitWidth = metrics.pairs[0]?.width / (totalCount - names[0]);
+  const valuesMatchNames = metrics.pairs.every(
+    (p, i) => Math.abs(p.width - unitWidth * (totalCount - names[i])) < 0.2,
+  );
   ctx.record(
     CONTRACT,
     label,
@@ -58,7 +68,8 @@ function recordRows(ctx, label, metrics, count) {
       metrics.maxError <= 2 &&
       (count < 2 || metrics.minPitch >= 24 - 0.001) &&
       ordered &&
-      widths,
+      widths &&
+      valuesMatchNames,
     JSON.stringify(metrics),
   );
 }
@@ -161,6 +172,25 @@ export async function uiModelRows(ctx) {
               tooltip.includes("Model 00 / a-very-long-friendly-model-name-for-truncation"),
               `轴标签=${await firstLabel.textContent()}`,
             );
+            // 强制真实悬浮输入柱，不能假定 CI 的 emphasis 已按固定时长解除。
+            const inputIndex = await page
+              .locator(".chart-canvas svg")
+              .evaluate(
+                (svg, fill) =>
+                  [...svg.querySelectorAll("path")].findIndex(
+                    (p) => getComputedStyle(p).fill === fill,
+                  ),
+                COLORS[theme],
+              );
+            await page.locator(".chart-canvas svg path").nth(inputIndex).hover();
+            await page.waitForTimeout(400);
+            recordRows(
+              ctx,
+              `${count}/${theme}/${viewport.label} 悬浮强调色不漏计柱条`,
+              await geometry(page, theme),
+              count,
+            );
+            await page.mouse.move(2, 2);
 
             if (count === 40) {
               // 持续采样高度，检查缩放与 observer 不出现 A→B→A 反复振荡。
@@ -196,7 +226,13 @@ export async function uiModelRows(ctx) {
                 state: "zoomed",
                 ...zoomed,
               });
-              recordRows(ctx, `40/${theme}/${viewport.label} 缩放后逐条对齐`, zoomed, zoomed.bars);
+              recordRows(
+                ctx,
+                `40/${theme}/${viewport.label} 缩放后逐条对齐`,
+                zoomed,
+                zoomed.bars,
+                40,
+              );
               const heights = await page.evaluate(() => {
                 window.__modelMeasure = false;
                 return window.__modelHeights.filter((v, i, a) => i === 0 || v !== a[i - 1]);

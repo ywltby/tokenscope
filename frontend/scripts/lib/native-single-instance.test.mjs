@@ -1055,6 +1055,111 @@ describe("路径布局与固定判定", () => {
       }
     });
 
+    it.each(["walk", "check"])(
+      "SmartScreen 精确缓存路径枚举后消失：%s 阶段不误判根隔离",
+      (phase) => {
+        const sandbox = createRunSandbox(`smartscreen-${phase}`);
+        const home = sandbox.dir("home");
+        const root = sandbox.dir("home", "workspace");
+        const parts = ["webview", "EBWebView", "SmartScreen", "RemoteData", "edgeSettings_2.0-0"];
+        const cache = sandbox.file("home", "workspace", ...parts, "cache");
+        writeManifest(sandbox, root, acceptanceManifest(root));
+        const racing = (p, opts) => {
+          if (path.resolve(String(p)) === path.resolve(cache)) {
+            throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+          }
+          return fs.lstatSync(p, opts);
+        };
+        try {
+          const result = validateAcceptancePaths({
+            root,
+            homeDir: home,
+            lstat: racing,
+            collectTree:
+              phase === "walk"
+                ? (r) => collectAcceptanceTreePaths(r, { lstatSync: racing })
+                : collectAcceptanceTreePaths,
+          });
+          expect(result.ok, result.reason).toBe(true);
+        } finally {
+          sandbox.cleanup();
+        }
+      },
+    );
+
+    it.each([
+      ["sources", "claude", "edgeSettings_2.0-0"],
+      ["webview", "EBWebView", "SmartScreen", "RemoteData", "edgeSettings_2.0-1"],
+      ["webview", "EBWebView", "SmartScreen", "other", "edgeSettings_2.0-0"],
+    ])("SmartScreen 同名/近似名但非精确缓存路径仍拒绝：%j", (...parts) => {
+      const sandbox = createRunSandbox("smartscreen-out-of-scope");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      const cache = sandbox.file("home", "workspace", ...parts, "cache");
+      const racing = (p, opts) => {
+        if (path.resolve(String(p)) === path.resolve(cache)) {
+          throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+        }
+        return fs.lstatSync(p, opts);
+      };
+      try {
+        expect(collectAcceptanceTreePaths(root, { lstatSync: racing }).ok).toBe(false);
+        expect(validateAcceptancePaths({ root, homeDir: home, lstat: racing }).ok).toBe(false);
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
+    it.each(["EACCES", "EPERM"])("SmartScreen 精确路径的 %s 不豁免", (code) => {
+      const sandbox = createRunSandbox(`smartscreen-${code}`);
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      const cache = sandbox.file(
+        "home",
+        "workspace",
+        "webview",
+        "EBWebView",
+        "SmartScreen",
+        "RemoteData",
+        "edgeSettings_2.0-0",
+        "cache",
+      );
+      const failing = (p, opts) => {
+        if (path.resolve(String(p)) === path.resolve(cache))
+          throw Object.assign(new Error(code), { code });
+        return fs.lstatSync(p, opts);
+      };
+      try {
+        expect(collectAcceptanceTreePaths(root, { lstatSync: failing }).ok).toBe(false);
+        expect(validateAcceptancePaths({ root, homeDir: home, lstat: failing }).ok).toBe(false);
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
+    it("SmartScreen 精确缓存名仍存在时的硬链接照常拒绝", () => {
+      const sandbox = createRunSandbox("smartscreen-hardlink");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      const target = sandbox.file("home", ".tokenscope", "must-not-touch", "real");
+      const dir = sandbox.dir(
+        "home",
+        "workspace",
+        "webview",
+        "EBWebView",
+        "SmartScreen",
+        "RemoteData",
+      );
+      fs.linkSync(target, path.join(dir, "edgeSettings_2.0-0"));
+      try {
+        const result = validateAcceptancePaths({ root, homeDir: home });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/硬链接/);
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
     it("受控库 sidecar 的 -wal/-shm 与 -journal 同样豁免（三后缀一致）", () => {
       // 范围正例：tokenscope/history.db-wal 与 -shm 命中受控库 sidecar 清单，
       // 与 -journal 行为一致。
