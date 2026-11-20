@@ -342,9 +342,8 @@ body {
   padding: 0 var(--ts-space-3);
   border-radius: var(--ts-radius-thumb);
   cursor: pointer;
-  transition:
-    color var(--ts-motion) var(--ts-ease),
-    font-weight var(--ts-motion) var(--ts-ease);
+  /* 字重立即切换，避免字宽插值在 thumb 滑动期间触发重复布局；选中仍为 600。 */
+  transition: color var(--ts-motion) var(--ts-ease);
 }
 .ts-segmented-item:hover {
   color: var(--ts-text);
@@ -353,21 +352,41 @@ body {
   color: var(--ts-text);
   font-weight: 600;
 }
+/* 未测量/隐藏恢复的首帧直接由真实按钮承载选中材质；伪元素不改变按钮
+   宽高，接管后与 thumb 互斥，不叠出双重描边。 */
+.ts-segmented:not(.is-thumb-ready) > .ts-segmented-item[aria-checked="true"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--ts-selected-stroke);
+  background: var(--ts-selected-bg);
+  border-radius: inherit;
+  box-shadow: var(--ts-selected-glow);
+  pointer-events: none;
+  z-index: -1;
+}
 .ts-segmented-thumb {
   position: absolute;
-  top: 1px;
+  top: 0;
   left: 0;
-  height: 28px;
   box-sizing: border-box;
   border: 1px solid var(--ts-selected-stroke);
   background: var(--ts-selected-bg);
   border-radius: var(--ts-radius-thumb);
   box-shadow: var(--ts-selected-glow);
+  visibility: hidden;
+  transition: none;
+  pointer-events: none;
+  z-index: 0;
+}
+.ts-segmented.is-thumb-ready > .ts-segmented-thumb {
+  visibility: visible;
+}
+.ts-segmented.is-thumb-ready.is-thumb-animating > .ts-segmented-thumb {
   transition:
     transform var(--ts-motion) var(--ts-ease),
     width var(--ts-motion) var(--ts-ease);
-  pointer-events: none;
-  z-index: 0;
 }
 .ts-segmented-item {
   z-index: 1;

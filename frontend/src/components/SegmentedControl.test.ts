@@ -21,6 +21,7 @@ vi.stubGlobal(
 );
 
 let itemWidths = [60, 50, 80];
+let measurable = true;
 const rect = (left: number, top: number, width: number, height: number): DOMRect =>
   ({
     left,
@@ -37,9 +38,21 @@ const rect = (left: number, top: number, width: number, height: number): DOMRect
 beforeEach(() => {
   roCallbacks.length = 0;
   itemWidths = [60, 50, 80];
+  measurable = true;
+  vi.spyOn(HTMLElement.prototype, "clientLeft", "get").mockImplementation(function (
+    this: HTMLElement,
+  ) {
+    return this.classList?.contains("ts-segmented") ? 1 : 0;
+  });
+  vi.spyOn(HTMLElement.prototype, "clientTop", "get").mockImplementation(function (
+    this: HTMLElement,
+  ) {
+    return this.classList?.contains("ts-segmented") ? 1 : 0;
+  });
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
     this: HTMLElement,
   ) {
+    if (!measurable) return rect(0, 0, 0, 0);
     if (this.classList?.contains("ts-segmented")) return rect(100, 10, 200, 32);
     if (this.classList?.contains("ts-segmented-item")) {
       const parent = this.parentElement;
@@ -94,6 +107,89 @@ function mountVModel(initial: "a" | "b" | "c" = "a") {
 }
 
 describe("SegmentedControl（UX02）", () => {
+  it("首帧保留按钮材质，首次有效测量后无动画接管", async () => {
+    const w = mountCtl("b");
+    try {
+      expect(w.classes()).not.toContain("is-thumb-ready");
+      expect(w.find('[aria-checked="true"]').attributes("aria-label")).toBe("B");
+      expect(w.find(".ts-segmented-thumb").attributes("aria-hidden")).toBe("true");
+      await flushPromises();
+      expect(w.classes()).toContain("is-thumb-ready");
+      expect(w.classes()).not.toContain("is-thumb-animating");
+      const thumb = w.find(".ts-segmented-thumb").element as HTMLElement;
+      expect(thumb.style.width).toBe("50px");
+      expect(thumb.style.height).toBe("28px");
+      expect(thumb.style.transform).toBe("translateX(63px)");
+      expect(thumb.style.top).toBe("1px");
+    } finally {
+      w.unmount();
+    }
+  });
+
+  it("只有选中值真正改变才启用动画，同项点击和 observer 不重复启动", async () => {
+    const w = mountVModel("a");
+    try {
+      await flushPromises();
+      const ctl = w.find(".ts-segmented");
+      await w.findAll(".ts-segmented-item")[0].trigger("click");
+      expect(ctl.classes()).not.toContain("is-thumb-animating");
+      await w.findAll(".ts-segmented-item")[1].trigger("click");
+      await flushPromises();
+      expect(ctl.classes()).toContain("is-thumb-animating");
+      for (const cb of roCallbacks) cb();
+      await flushPromises();
+      expect(ctl.classes()).toContain("is-thumb-animating");
+      itemWidths = [90, 70, 80];
+      for (const cb of roCallbacks) cb();
+      await flushPromises();
+      expect(ctl.classes()).not.toContain("is-thumb-animating");
+      expect((w.find(".ts-segmented-thumb").element as HTMLElement).style.width).toBe("70px");
+    } finally {
+      w.unmount();
+    }
+  });
+
+  it("隐藏时弃用零尺寸，隐藏期改值后恢复无动画对齐", async () => {
+    const w = mountCtl("a");
+    try {
+      await flushPromises();
+      measurable = false;
+      for (const cb of roCallbacks) cb();
+      await flushPromises();
+      expect(w.classes()).not.toContain("is-thumb-ready");
+      await w.setProps({ modelValue: "c" });
+      expect(w.classes()).not.toContain("is-thumb-ready");
+      measurable = true;
+      for (const cb of roCallbacks) cb();
+      await flushPromises();
+      expect(w.classes()).toContain("is-thumb-ready");
+      expect(w.classes()).not.toContain("is-thumb-animating");
+      expect((w.find(".ts-segmented-thumb").element as HTMLElement).style.transform).toBe(
+        "translateX(115px)",
+      );
+    } finally {
+      w.unmount();
+    }
+  });
+
+  it("初始隐藏不接管，文案/选项变化只即时对齐", async () => {
+    measurable = false;
+    const w = mountCtl("a");
+    try {
+      await flushPromises();
+      expect(w.classes()).not.toContain("is-thumb-ready");
+      measurable = true;
+      itemWidths = [84, 50, 80];
+      await w.setProps({ options: OPTIONS.map((o) => ({ ...o, label: `Long ${o.label}` })) });
+      await flushPromises();
+      expect(w.classes()).toContain("is-thumb-ready");
+      expect(w.classes()).not.toContain("is-thumb-animating");
+      expect((w.find(".ts-segmented-thumb").element as HTMLElement).style.width).toBe("84px");
+    } finally {
+      w.unmount();
+    }
+  });
+
   it("arrow_selection_moves_dom_focus：方向键移动选中并真实聚焦", async () => {
     const w = mountVModel("a");
     await flushPromises();
@@ -168,7 +264,7 @@ describe("SegmentedControl（UX02）", () => {
     await flushPromises();
     const thumb = w.find(".ts-segmented-thumb").element as HTMLElement;
     expect(thumb.style.width).toBe("60px");
-    expect(thumb.style.transform).toBe("translateX(2px)");
+    expect(thumb.style.transform).toBe("translateX(1px)");
 
     // 选中项被撑宽（内容变化/字体加载）：ResizeObserver 触发重定位
     itemWidths = [90, 50, 80];
@@ -176,7 +272,7 @@ describe("SegmentedControl（UX02）", () => {
     await nextTick();
     await flushPromises();
     expect(thumb.style.width).toBe("90px");
-    expect(thumb.style.transform).toBe("translateX(2px)");
+    expect(thumb.style.transform).toBe("translateX(1px)");
     w.unmount();
   });
 
@@ -193,7 +289,7 @@ describe("SegmentedControl（UX02）", () => {
     expect(document.activeElement).toBe(items[0].element);
     // thumb 已跟随新选中项
     const thumb = w.find(".ts-segmented-thumb").element as HTMLElement;
-    expect(thumb.style.transform).toBe("translateX(116px)");
+    expect(thumb.style.transform).toBe("translateX(115px)");
     w.unmount();
   });
 
