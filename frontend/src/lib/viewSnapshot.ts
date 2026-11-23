@@ -48,6 +48,8 @@ import { invoke } from "@tauri-apps/api/core";
  * v13 = 日汇总费用覆盖判定（v0.9.2）——unknown_tokens/
  * unknown_pricing 的语义从「汇总 token 全部未定价」改为「实际未获费用
  * 覆盖」；旧快照的费用状态列与未知读数不再可信，读取时忽略重建；
+ * v24 = 「展示名质量分级」：正式模型名优先于渠道填入的 ID 抄写，旧快照的
+ * 模型标签不再可信，读取时忽略重建；筛选偏好、时区与历史数据不受影响。
  * v12 = 「时间预设」取代固定日期区间（`filters.preset`），
  * 且快照**不再包含、也不再写入时区**——时区是 settings.toml 的单一来源，
  * 快照恢复不得改写它；v11 = 「只看请求明细」（rollups_mode）随快照保存/恢复，
@@ -57,7 +59,7 @@ import { invoke } from "@tauri-apps/api/core";
  * session/project，v9 及更早快照的分组与下钻 key 不再可信；
  * v9 = 模型匹配规则（等价键）；v8 = 项目根归并；v7 = 统一项目身份；
  * v6 = 查询会话契约（SF04）；v5 及更早版本不含会话身份且游标为旧格式。 */
-export const SNAPSHOT_VERSION = 23;
+export const SNAPSHOT_VERSION = 24;
 
 export type SnapshotDispatch = (payload: unknown) => Promise<void>;
 

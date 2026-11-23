@@ -2545,7 +2545,7 @@ it.each([false, true])(
     await snapshotQueueIdle();
     expect((state(w)["report"] as SummaryReport).groups).toEqual(merged.groups);
     const save = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save").at(-1);
-    expect(save?.[1]).toMatchObject({ value: { v: 23, report: merged } });
+    expect(save?.[1]).toMatchObject({ value: { v: SNAPSHOT_VERSION, report: merged } });
     w.unmount();
   },
 );

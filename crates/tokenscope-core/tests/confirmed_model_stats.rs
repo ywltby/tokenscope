@@ -192,6 +192,66 @@ fn group_tokens(group: &Group) -> [u64; 4] {
     [input, output, cache_write, cache_read]
 }
 
+/// v0.9.8（DN）：302ai 的 ID 抄写在目录里排前，也不得盖掉聚合表、图表与
+/// CCS 日汇总共用的正式名；请求明细保留原始 ID，费用用量不被改写。
+#[test]
+fn formal_display_name_shared_by_aggregate_chart_and_rollup() {
+    const OPUS: &str = "claude-opus-4-7";
+    let f = Fixture::new();
+    f.write_claude(&[claude(
+        "opus-native",
+        "2026-05-28T01:00:00Z",
+        OPUS,
+        [1500, 250, 0, 0],
+    )]);
+    f.seed_rollups(&[rollup("route", DAY, OPUS, 2, [2000, 400, 0, 0], Some(0.5))]);
+    f.write_modelsdev(json!([
+        {"id":"302ai/claude-opus-4-7", "name":"claude-opus-4-7", "input":3.0, "output":15.0, "cache_read":1.0},
+        {"id":"anthropic/claude-opus-4-7", "name":"Claude Opus 4.7", "input":3.0, "output":15.0, "cache_read":1.0}
+    ]));
+    let handle = begin_query(&f.opts).unwrap();
+    let report = query_summary(&handle.query_id).unwrap();
+    let group = only_group(&report);
+    assert_eq!(
+        group.key, "anthropic/claudeopus47",
+        "展示名不改变化既有确认别名产生的统计分组键"
+    );
+    assert_eq!(
+        group.label.as_deref(),
+        Some("Claude Opus 4.7"),
+        "聚合表与图表共用的标签是正式名，不是 302ai 的 ID 抄写"
+    );
+    close(group.source_cost_usd.unwrap(), 0.5);
+
+    let drill = query_events(
+        &handle.query_id,
+        &EventFilter {
+            model: Some(OPUS.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(drill.total >= 1, "下钻需返回原生请求或 CCS 日行");
+    let mut saw_native = false;
+    let mut saw_rollup = false;
+    for row in &drill.rows {
+        assert_ne!(
+            row.model, "Claude Opus 4.7",
+            "请求明细保留 ID（原始或已确认规范写法），不写入展示名"
+        );
+        if let Some(meta) = row.rollup.as_ref() {
+            saw_rollup = true;
+            assert_eq!(meta.label, "Claude Opus 4.7", "CCS 日汇总与聚合表名称一致");
+            assert_eq!(meta.models, [OPUS], "CCS 原始 ID 详情可查");
+        } else {
+            saw_native = true;
+        }
+    }
+    assert!(saw_native, "需含原生请求明细");
+    assert!(saw_rollup, "需含 CCS 日汇总行");
+    reconcile(group, &drill.rows);
+}
+
 #[test]
 fn workbuddy_and_imported_hy3_are_one_statistics_group() {
     let f = Fixture::new();

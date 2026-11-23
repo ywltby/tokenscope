@@ -198,6 +198,96 @@ fn model_display_name_requires_trusted_source() {
     );
 }
 
+/// v0.9.8（DN01）：302ai 的 name 是末段 ID 原样，字典序排在官方/正式条目前，
+/// 旧逻辑会盖掉 `Claude Opus 4.7` 等正式名。名称质量分级后应始终选正式名。
+#[test]
+fn model_display_name_prefers_formal_name_over_id_copy() {
+    let dir = tmp("formal-over-id-copy");
+    // 302ai 关键在前，其 name 是末段原样；abacus/anthropic/openai 给正式名。
+    let body = r#"{
+        "302ai": {"models": {
+            "claude-opus-4-7": {"name": "claude-opus-4-7", "cost": {"input": 3, "output": 15}},
+            "claude-sonnet-4-6": {"name": "claude-sonnet-4-6", "cost": {"input": 3, "output": 15}},
+            "gpt-5.4": {"name": "gpt-5.4", "cost": {"input": 3, "output": 15}}
+        }},
+        "abacus": {"models": {
+            "claude-opus-4-7": {"name": "Claude Opus 4.7", "cost": {"input": 3, "output": 15}},
+            "claude-sonnet-4-6": {"name": "Claude Sonnet 4.6", "cost": {"input": 3, "output": 15}},
+            "gpt-5.4": {"name": "GPT-5.4", "cost": {"input": 3, "output": 15}}
+        }},
+        "anthropic": {"models": {
+            "claude-opus-4-7": {"name": "Claude Opus 4.7", "cost": {"input": 3, "output": 15}}
+        }},
+        "openai": {"models": {
+            "gpt-5.4": {"name": "GPT-5.4", "cost": {"input": 3, "output": 15}}
+        }}
+    }"#;
+    let snap = sync_to(&dir, "md.json", body);
+    let (p, _w) = Pricing::load(None, Some(&snap), None);
+    assert_eq!(
+        p.display_name_for("claude-opus-4-7").as_deref(),
+        Some("Claude Opus 4.7"),
+        "302ai 的 ID 抄写不得盖掉正式名"
+    );
+    assert_eq!(
+        p.display_name_for("claude-sonnet-4-6").as_deref(),
+        Some("Claude Sonnet 4.6")
+    );
+    assert_eq!(
+        p.display_name_for("gpt-5.4").as_deref(),
+        Some("GPT-5.4"),
+        "短名与标点保留"
+    );
+    // 目录乱序不影响结果。
+    let dir2 = tmp("formal-order-independent");
+    let body2 = r#"{
+        "openai": {"models": {
+            "gpt-5.4": {"name": "GPT-5.4", "cost": {"input": 3, "output": 15}}
+        }},
+        "abacus": {"models": {
+            "claude-opus-4-7": {"name": "Claude Opus 4.7", "cost": {"input": 3, "output": 15}},
+            "gpt-5.4": {"name": "GPT-5.4", "cost": {"input": 3, "output": 15}}
+        }},
+        "302ai": {"models": {
+            "claude-opus-4-7": {"name": "claude-opus-4-7", "cost": {"input": 3, "output": 15}},
+            "gpt-5.4": {"name": "gpt-5.4", "cost": {"input": 3, "output": 15}}
+        }}
+    }"#;
+    let snap2 = sync_to(&dir2, "md.json", body2);
+    let (p2, _w2) = Pricing::load(None, Some(&snap2), None);
+    assert_eq!(
+        p2.display_name_for("claude-opus-4-7").as_deref(),
+        Some("Claude Opus 4.7")
+    );
+    assert_eq!(p2.display_name_for("gpt-5.4").as_deref(), Some("GPT-5.4"));
+}
+
+/// DN02：没有正式名时，ID 抄写式 name 仍是合法兜底（如 `o3` 的目录名就是 `o3`）。
+#[test]
+fn model_display_name_id_copy_is_last_resort() {
+    let dir = tmp("id-copy-fallback");
+    let snap = sync_to(
+        &dir,
+        "md.json",
+        r#"{"302ai": {"models": {"o3": {"name": "o3", "cost": {"input": 3, "output": 15}}}}}"#,
+    );
+    let (p, _w) = Pricing::load(None, Some(&snap), None);
+    assert_eq!(p.display_name_for("o3").as_deref(), Some("o3"));
+}
+
+/// DN03：只有 ID 抄写、没有任何正式名时也不凭空造名；无目录条目返回 None。
+#[test]
+fn model_display_name_untrusted_id_returns_none() {
+    let (p, _w) = Pricing::load(None, None, None);
+    assert_eq!(
+        p.display_name_for("gpt-6-astra-cc-format"),
+        None,
+        "无目录记录保留原始 ID"
+    );
+    assert_eq!(p.display_name_for("grok-4.6-build"), None);
+    assert_eq!(p.display_name_for("glm-5.2-x"), None);
+}
+
 #[test]
 fn blank_model_name_is_unavailable() {
     let dir = tmp("blank-name");

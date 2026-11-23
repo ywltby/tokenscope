@@ -77,6 +77,36 @@ fn usable_name(name: &Option<String>) -> bool {
     name.as_deref().is_some_and(|n| !n.trim().is_empty())
 }
 
+/// v0.9.8（DN）：判断条目 name 是否为「原始 ID 抄写」——渠道把模型 ID 原样
+/// 填进了 name 字段（本机 `302ai/claude-opus-4-7` 的 name 就是 `claude-opus-4-7`）。
+/// 判据同时满足三点才成立：与条目 ID 的末段（或完整 ID）原样一致、全小写、
+/// 含 ID 风格分隔符（`-`/`_`/`.`）。这样 `o3`、`hy3` 这类合法短名与
+/// `Claude Opus 4.7`、`GPT-5.4` 这类带大写/空格的正式名都不被误判。
+fn is_id_copy_name(name: &str, display: &str) -> bool {
+    let name = name.trim();
+    let leaf = display.rsplit('/').next().unwrap_or(display);
+    if name != leaf && name != display {
+        return false;
+    }
+    name.chars().all(|c| !c.is_uppercase())
+        && (name.contains('-') || name.contains('_') || name.contains('.'))
+}
+
+/// 展示名质量：2 = 正式模型名；1 = ID 抄写（兜底）；0 = 不可用。
+/// 正式名优先于抄写名，避免字典序靠前的代理渠道（302ai）盖掉同组已有
+/// 的正式名（Claude Opus 4.7 / GPT-5.4）。
+fn display_name_quality(e: &Entry) -> u8 {
+    if !usable_name(&e.name) {
+        return 0;
+    }
+    let name = e.name.as_deref().unwrap_or("");
+    if is_id_copy_name(name, &e.display) {
+        1
+    } else {
+        2
+    }
+}
+
 /// 归一后基名为空（`provider/-._`、`-._`）→ 不是有效价格键：拒绝入库并由调用方
 /// 给出诊断（查询端同样拒绝空键，这里从源头保证空键不进入价格表）。
 fn empty_model_key(display: &str) -> bool {
@@ -3159,10 +3189,23 @@ impl Pricing {
         let group = self.by_prefix.get(id.leaf_key().as_bytes())?;
         let mut best: Option<&Entry> = None;
         for e in group {
-            if e.tier != TIER_MODELSDEV || !usable_name(&e.name) {
+            if e.tier != TIER_MODELSDEV {
                 continue;
             }
-            if best.is_none_or(|b| entry_display_order(e, b)) {
+            let Some(cur) = best else {
+                if display_name_quality(e) > 0 {
+                    best = Some(e);
+                }
+                continue;
+            };
+            // 先比名称质量（正式名 > ID 抄写），同级再用稳定字典序打破并列。
+            // 目录乱序或新增代理渠道时，同一质量级的结果仍确定。
+            let better = match display_name_quality(e).cmp(&display_name_quality(cur)) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Equal => entry_display_order(e, cur),
+                std::cmp::Ordering::Less => false,
+            };
+            if better {
                 best = Some(e);
             }
         }
