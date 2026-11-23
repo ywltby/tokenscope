@@ -1,7 +1,7 @@
 # 已确认的同模型渠道与计费档合并展示
 
 - 分支：`fix/confirmed-model-stats-grouping`，自 `origin/main` `f0fc12eb059fcbfb12838bc4505954bdc68cfca5`（v0.9.6、视图快照 v22）。
-- 状态：初始修复 `d25993e`、两处复核补修 `12f8579` 与分段控件末帧采样修复 `fa5e657` 均已正常钩子提交；PR [#78](https://github.com/ywltby/tokenscope/pull/78) 最新 HEAD `fa5e657` 的必需检查全绿。**停在可审查状态**：不合并、不发布、不安装。
+- 状态：初始修复 `d25993e`、两处复核补修 `12f8579` 与分段控件终态采样修复 `fa5e657` / `7b9ba12` 均已正常钩子提交；PR [#78](https://github.com/ywltby/tokenscope/pull/78)。代码 HEAD **`7b9ba12`** 的必需检查全绿。最终回填文档提交只改计划，其门禁以 PR 最新 HEAD 实跑为准。**停在可审查状态**：不合并、不发布、不安装。
 - 发行版本：仓库工具取号 **0.9.7**；已核对并登记 v0.9.6 原发布资产作为上一版升级基线。基线选择为 0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 / 0.6.0 / 0.9.6（present/deleted 共 12 组）。
 
 ## 1. 问题与不变量
@@ -82,6 +82,8 @@
 - 红/绿与截图证据：`qa-artifacts/confirmed-model-stats/{model-preference-red,snapshot-validation-red,review-migration-green,review-core-regressions,review-browser}.log`、`review-browser/`（忽略入库）。
 - **最终完整钩子与 PR 门禁**：
   - 产品提交 `fa5e657` 的正常完整钩子通过：default workspace **1052 passed / 88 目标，0 failed**、acceptance **1071 passed / 88 目标，0 failed**；前端 **82 文件 / 1222 例**；浏览器 17 个具名契约全绿（含 `segmented_cold_start_highlight` 29、`saved_model_drill_migration` 10、`confirmed_model_stats_grouping` 11、`rollup_drilldown_rows` 19）；脚本契约 415 通过。
-  - 首次远端 `frontend` 在 `12f8579` 失败：`segmented_cold_start_highlight` 的方向键切换末帧采样停在 `183.2532px`（目标 `183px`，差 **0.2532px** > 0.25px），与本批统计无关。修复只让探针在 320ms 等待后**同步读取真实终态**；0.25px 阈值与中间帧要求未放宽。补修后在四项组合上该契约 29 条断言全通过，正常钩子整链通过，提交 `fa5e657`。
-  - PR [#78](https://github.com/ywltby/tokenscope/pull/78)（`fix/confirmed-model-stats-grouping` → `main`）最新 HEAD **`fa5e657f6511deee710a8051d536e8c9b3cb463c`** 的必需检查全绿：[CI](https://github.com/ywltby/tokenscope/actions/runs/45150878718) rust 6m30s / rust-acceptance 4m10s / contracts 8m28s / frontend 9m29s / **gate pass**；[Install test](https://github.com/ywltby/tokenscope/actions/runs/45150878653) install-test 10m24s、12 组单跳升级（含 0.9.6）全 pass、plan-upgrades pass；[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/45150878616) native-ui 11m30s。
+  - 首次远端 `frontend` 在 `12f8579` 失败：`segmented_cold_start_highlight` 的方向键切换末帧采样停在 `183.2532px`（目标 `183px`，差 **0.2532px** > 0.25px），与本批统计无关。第一次修复（`fa5e657`）让探针在 320ms 等待后同步读取真实终态，0.25px 阈值与中间帧要求未放宽，该提交 CI 全绿。
+  - 纯文档提交 `5ebb755` 上 `frontend` 再次失败，仍是同一分段动画：固定 320ms 在 CI 负载下早于过渡完成，末帧残留 **0.2557px**（鼠标）/ **1.07px**（键盘）。第二次修复（`7b9ba12`）改为在 **≤2s 有界轮询**内等待滑动层与选中按钮真实对齐，再同步采终态；阈值、中间帧数量和失败条件不变，2s 内未对齐仍失败。四项组合复验 29 条断言全通过，正常完整钩子整链通过。
+  - 最终代码 HEAD **[`7b9ba12491150062dffc211a0b56e710dc23804a`](https://github.com/ywltby/tokenscope/pull/78/commits/7b9ba12491150062dffc211a0b56e710dc23804a)** 的必需检查全绿（[CI](https://github.com/ywltby/tokenscope/actions/runs/45157592798) rust 6m4s / rust-acceptance 5m53s / contracts 9m32s / frontend 10m17s / **gate pass**；[Install test](https://github.com/ywltby/tokenscope/actions/runs/45157592910) install-test 8m11s、12 组单跳升级（含 0.9.6）全 pass；[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/45157592899) native-ui 11m51s）。
+  - 之后仅回填本计划的纯文档提交不改产品；其 PR 最新 HEAD 检查在交付回复中核对。已有 `fa5e657` 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/45150878718) / [Install](https://github.com/ywltby/tokenscope/actions/runs/45150878653) / [Native](https://github.com/ywltby/tokenscope/actions/runs/45150878616) 仅作历史记录。
   - 本地 `bump_version.py --check --base-ref origin/main` = **0.9.7 / patch / base `f0fc12e` / release true**。
