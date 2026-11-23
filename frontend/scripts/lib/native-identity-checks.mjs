@@ -34,18 +34,7 @@ const structuralKey = (value) =>
   String(value)
     .toLowerCase()
     .replace(/[^a-z0-9/:]/g, "");
-// 与后端 canonical_identity_key 同构：无渠道前缀的裸标识末段精确命中唯一
-// 可信 models.dev 模型时归一到该渠道结构键（夹具 fixtures/pricing/modelsdev.json）；
-// 带变体或未确认前缀保持结构键。
-const TRUSTED_LEAF = {
-  claudeopus55: "anthropic/claudeopus55",
-  gpt56: "anthropic/gpt56",
-};
-const modelKey = (value) => {
-  const structural = structuralKey(value);
-  if (structural.includes("/")) return structural;
-  return TRUSTED_LEAF[structural] ?? structural;
-};
+// 本夹具未提供目录关系；末段唯一也不能据此认定跨渠道别名。
 function dayOf(row, timezone) {
   const date = new Date(row.ts);
   if (!Number.isFinite(date.valueOf())) return null;
@@ -115,7 +104,7 @@ export function judgeIdentity(name, evidence = {}) {
       break;
     }
     case "model_variants_merge_with_friendly_name": {
-      const matches = groups(e.model).filter((group) => group.key === "anthropic/claudeopus55");
+      const matches = groups(e.model).filter((group) => group.key === "claudeopus55");
       ok =
         same(e.model) &&
         matches.length === 1 &&
@@ -153,7 +142,7 @@ export function judgeIdentity(name, evidence = {}) {
               type === "day"
                 ? dayOf(row, snapshot.summary.timezone) === drill.key
                 : type === "model"
-                  ? modelKey(row.model) === drill.key
+                  ? structuralKey(row.model) === drill.key
                   : row.project === drill.key,
             ) &&
             same(drill.cleared) &&

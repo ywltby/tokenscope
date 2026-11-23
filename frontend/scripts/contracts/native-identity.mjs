@@ -182,7 +182,7 @@ export async function nativeIdentity(context) {
       visibleLabels: await summaryLabels(),
       usageText: await ui.root().innerText(),
     });
-    const opus = model.summary.groups.find((group) => group.key === "anthropic/claudeopus55");
+    const opus = model.summary.groups.find((group) => group.key === "claudeopus55");
     if (!opus) throw new Error("缺少归一化 Opus 模型行");
     const modelDetail = await drill("model", opus);
     check("model_detail_keeps_raw_names", { detail: modelDetail, detailText: await detailText() });

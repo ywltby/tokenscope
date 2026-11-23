@@ -422,28 +422,23 @@ fn distinct_versions_variants_and_same_name_stay_separate() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 裸末段命中多个 models.dev 模型（歧义）→ 不确认、不合并。
-/// 用不在确认映射里的 opus：已核实别名对（fable）按 §8.1 优先于目录判断。
+/// 裸末段命中多个 models.dev 模型但没有明确关系 → 不确认、不合并。
 #[test]
 fn ambiguous_bare_leaf_not_merged() {
     let dir = temp_dir("ambiguous");
     write_md(
         &dir,
         serde_json::json!([
-            {"id": "anthropic/claude-opus-4-7", "name": "Claude Opus 4.7",
+            {"id": "lab/demo-4-7", "name": "Demo 4.7",
              "input": 3.0, "output": 15.0},
-            {"id": "mirror/claude-opus-4-7", "name": "Opus 4.7 (Mirror)",
+            {"id": "mirror/demo-4-7", "name": "Demo 4.7",
              "input": 1.0, "output": 5.0}
         ]),
     );
     let history = history_of(&dir);
-    for (i, m) in [
-        "claude-opus-4-7",
-        "anthropic/claude-opus-4-7",
-        "mirror/claude-opus-4-7",
-    ]
-    .iter()
-    .enumerate()
+    for (i, m) in ["demo-4-7", "lab/demo-4-7", "mirror/demo-4-7"]
+        .iter()
+        .enumerate()
     {
         write_detail(
             &history,
@@ -1087,9 +1082,8 @@ fn detail_only_instant_and_tz_mismatch_keep_no_rollup_rows() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 升级零迁移：同一历史库，无 models.dev 快照时保持旧行为（两行），
-/// 放入快照后不重导即合并；库内 model_identity 列值不变。
-/// 用不在确认映射里的 opus——已核实别名对（fable）无快照也归一（§8.1）。
+/// 升级零迁移：同一历史库，缺少关系证据时两行；加入含基础模型 ID 的目录
+/// 快照后不重导即合并；库内 model_identity 列值不变。
 #[test]
 fn upgrade_without_reimport_merges_after_snapshot_added() {
     let dir = temp_dir("upgrade");
@@ -1098,7 +1092,7 @@ fn upgrade_without_reimport_merges_after_snapshot_added() {
         &history,
         "native|claude|/logs/a.jsonl|0|fp",
         "2026-11-10T09:00:00Z",
-        "anthropic/claude-opus-4-7",
+        "lab/demo-4-7",
         counts(1000, 500, 0, 0),
         None,
     );
@@ -1106,7 +1100,7 @@ fn upgrade_without_reimport_merges_after_snapshot_added() {
         &history,
         "native|claude|/logs/a.jsonl|1|fp",
         "2026-11-10T09:05:00Z",
-        "claude-opus-4-7",
+        "mirror/demo-4-7",
         counts(1000, 500, 0, 0),
         None,
     );
@@ -1123,7 +1117,7 @@ fn upgrade_without_reimport_merges_after_snapshot_added() {
             .collect()
     };
     let before = stored_identities();
-    assert_eq!(before, vec!["anthropic/claudeopus47", "claudeopus47"]);
+    assert_eq!(before, vec!["lab/demo47", "mirror/demo47"]);
 
     let o = opts(
         &dir,
@@ -1138,7 +1132,13 @@ fn upgrade_without_reimport_merges_after_snapshot_added() {
         "无快照 = 保守不合并（旧行为）"
     );
 
-    write_md(&dir, opus_md());
+    write_md(
+        &dir,
+        serde_json::json!([{
+            "id": "mirror/demo-4-7", "canonical_model_id": "lab/demo-4-7",
+            "name": "Demo 4.7", "input": 2.0, "output": 4.0
+        }]),
+    );
     let report = summary(&o).unwrap();
     assert_eq!(real_groups(&report).len(), 1, "放入快照后无需重导即合并");
     assert_eq!(real_groups(&report)[0].requests, 2);
@@ -1264,10 +1264,10 @@ fn rollup_row_cost_matches_aggregation_four_states() {
         "显式 0 是有费用依据"
     );
     assert_eq!(zero.source_cost_state, Some("full"));
-    let est = group_of(&report, "vendor/mest");
+    let est = group_of(&report, "mest");
     assert!(close(est.total_cost_usd.unwrap(), 4.0), "1M×2 + 0.5M×4");
     assert!(est.has_estimated_cost);
-    let partial = group_of(&report, "vendor/mpartial");
+    let partial = group_of(&report, "mpartial");
     assert!(close(partial.total_cost_usd.unwrap(), 2.0));
     assert!(partial.cost_partially_unknown);
     assert_eq!(partial.unknown_tokens.output, 500_000);

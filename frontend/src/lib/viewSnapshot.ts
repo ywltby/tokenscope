@@ -3,7 +3,9 @@
 // 合并待保存最新项 + 串行派发：绝不并发 fire-and-forget 让旧写覆盖新写。
 import { invoke } from "@tauri-apps/api/core";
 
-/** 快照格式版本：v22 = 跨渠道别名合并 + CCS 日汇总下钻行（v0.9.4）——
+/** 快照格式版本：v23 = 独立模型统计分组键（同模型渠道与已确认的计费档）。
+ * v22 的拆分模型行、旧下钻结果不再恢复，只重建视图，不触碰历史与价格输入。
+ * v22 = 跨渠道别名合并 + CCS 日汇总下钻行（v0.9.4）——
  * 同一模型的不同渠道写法归一为一个分组键，纯日汇总模型的下钻从 0 行变为
  * 按统计日的 CCS 日行，「未知项目」下钻也纳入日行；v21 快照的分组行数、
  * 下钻 key 与明细行数都不再可信（升级后首屏可能继续显示两行同名模型或空的
@@ -55,7 +57,7 @@ import { invoke } from "@tauri-apps/api/core";
  * session/project，v9 及更早快照的分组与下钻 key 不再可信；
  * v9 = 模型匹配规则（等价键）；v8 = 项目根归并；v7 = 统一项目身份；
  * v6 = 查询会话契约（SF04）；v5 及更早版本不含会话身份且游标为旧格式。 */
-export const SNAPSHOT_VERSION = 22;
+export const SNAPSHOT_VERSION = 23;
 
 export type SnapshotDispatch = (payload: unknown) => Promise<void>;
 

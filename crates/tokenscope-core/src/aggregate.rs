@@ -27,10 +27,14 @@ struct GroupAccum {
 /// 身份键（`claudeopus55` 这类写法只用于筛选与下钻匹配）。
 /// v0.9.4：下钻日汇总行复用同一展示名规则（聚合行与汇总行名称一致）。
 pub(crate) fn model_label(key: &str, representative: Option<&str>, pricing: &Pricing) -> String {
+    // 已核实的 Hy3 组即使只含免费档贡献、或目录离线，也显示基础型号。
+    if key == "tencent/hy3" {
+        return "Hy3".into();
+    }
     let rep = representative.unwrap_or(key);
     pricing
-        .display_name_for(rep)
-        .or_else(|| pricing.display_name_for(key))
+        .display_name_for(key)
+        .or_else(|| pricing.display_name_for(rep))
         .unwrap_or_else(|| rep.to_string())
 }
 
@@ -403,15 +407,13 @@ impl AggregateState {
     }
 
     fn push_view(&mut self, e: &EventView<'_>, pricing: &Pricing) -> anyhow::Result<()> {
-        // v0.9.4：分组与覆盖判定共用规范身份（可信价格表确认的渠道别名）；
-        // 其他维度且无覆盖桶时不需要身份，不做多余归一化。
-        let model_key = (self.by == GroupBy::Model || self.covered.is_some())
-            .then(|| pricing.canonical_identity_key(e.model));
-        if let Some(key) = &model_key
-            && self.covered_by_rollup(e, key)
+        // 覆盖是取证规则：不能用更宽的统计展示键跳过原生请求。
+        if self.covered.is_some()
+            && self.covered_by_rollup(e, &pricing.canonical_identity_key(e.model))
         {
             return Ok(());
         }
+        let model_key = (self.by == GroupBy::Model).then(|| pricing.model_stats_key(e.model));
         if !self.agent_seen.contains(&e.agent.as_str()) {
             self.agent_seen.push(e.agent.as_str());
         }
@@ -660,7 +662,7 @@ fn push_rollup_into(
     {
         let key = match by {
             GroupBy::Day => r.day.clone(),
-            GroupBy::Model => pricing.canonical_identity_key(&r.model),
+            GroupBy::Model => pricing.model_stats_key(&r.model),
             // 日汇总没有 cwd/project：与明细侧同一约定，保持「未知」。
             GroupBy::Project => UNKNOWN_PROJECT.to_string(),
             GroupBy::Agent => r.app.as_str().to_string(),
@@ -1026,7 +1028,7 @@ mod tests {
             },
         ];
         let agg = aggregate(&events, GroupBy::Model, &tz(), &Pricing::default()).unwrap();
-        assert_eq!(agg.groups.len(), 3); // grok、claude、合计
+        assert_eq!(agg.groups.len(), 3); // Hy3、Claude、合计
         // MP04：Model 维度的 key 是等价身份键，label 是无可信名称时的原始代表写法。
         assert_eq!(agg.groups[0].key, "claudesonnet45");
         assert_eq!(agg.groups[0].label.as_deref(), Some("claude-sonnet-4-5"));
@@ -1034,7 +1036,8 @@ mod tests {
         // Task 1：默认空价格表 → 所有模型 unknown（无编译期兜底）。
         assert!(agg.groups[0].unknown_pricing);
         assert_eq!(agg.groups[0].unknown_tokens.input, 5);
-        assert_eq!(agg.groups[1].key, "tencent/hy3:free");
+        assert_eq!(agg.groups[1].key, "tencent/hy3");
+        assert_eq!(agg.groups[1].label.as_deref(), Some("Hy3"));
         assert!(agg.groups[1].unknown_pricing);
         assert_eq!(agg.groups[1].unknown_tokens.input, 1);
         assert_eq!(agg.totals.unknown_tokens.input, 6);

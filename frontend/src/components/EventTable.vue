@@ -42,6 +42,9 @@ const hoverKey = ref<string | null>(null);
 const focusKey = ref<string | null>(null);
 const pinnedKey = ref<string | null>(null);
 const openKey = computed(() => hoverKey.value ?? focusKey.value ?? pinnedKey.value);
+// 合并后的原始模型 ID 也必须可由键盘读取，不只支持 tooltip 默认的 hover。
+const modelHoverKey = ref<string | null>(null);
+const modelFocusKey = ref<string | null>(null);
 function closeRowTip(key: string): void {
   if (hoverKey.value === key) hoverKey.value = null;
   if (focusKey.value === key) focusKey.value = null;
@@ -165,24 +168,56 @@ const columns = computed<DataTableColumn[]>(() => [
       // v0.9.4：日汇总行显示可信展示名 + 真实请求数；悬浮可见合并的
       // 渠道模型与来源统计时区（同日多渠道汇总合并为一行）。
       if (m) {
+        const content = t("dashboard.rollupModelsTip", {
+          models: m.models.join(", "),
+          tz: m.source_tz,
+        });
+        const key = row.cursor;
         return h(
           NTooltip,
-          { style: "white-space: pre-line" },
+          {
+            style: "white-space: pre-line",
+            trigger: "manual",
+            show: modelHoverKey.value === key || modelFocusKey.value === key,
+          },
           {
             trigger: () =>
-              h("span", { tabindex: 0, class: "ts-focusable", style: "cursor: help" }, [
-                m.label,
-                h(
-                  "span",
-                  { class: "ts-rollup-requests" },
-                  ` · ${t("dashboard.rollupRequests", { n: fmtNum(m.requests) })}`,
-                ),
-              ]),
-            default: () =>
-              t("dashboard.rollupModelsTip", {
-                models: m.models.join(", "),
-                tz: m.source_tz,
-              }),
+              h(
+                "span",
+                {
+                  tabindex: 0,
+                  class: "ts-focusable",
+                  style: "cursor: help",
+                  "aria-label": `${m.label} · ${content}`,
+                  onMouseenter: () => {
+                    modelHoverKey.value = key;
+                  },
+                  onMouseleave: () => {
+                    if (modelHoverKey.value === key) modelHoverKey.value = null;
+                  },
+                  onFocus: () => {
+                    modelFocusKey.value = key;
+                  },
+                  onBlur: () => {
+                    if (modelFocusKey.value === key) modelFocusKey.value = null;
+                  },
+                  onKeydown: (e: KeyboardEvent) => {
+                    if (e.key === "Escape") {
+                      modelHoverKey.value = null;
+                      modelFocusKey.value = null;
+                    }
+                  },
+                },
+                [
+                  m.label,
+                  h(
+                    "span",
+                    { class: "ts-rollup-requests" },
+                    ` · ${t("dashboard.rollupRequests", { n: fmtNum(m.requests) })}`,
+                  ),
+                ],
+              ),
+            default: () => content,
           },
         );
       }

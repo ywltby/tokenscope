@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::TokenCounts;
 use crate::openrouter;
 
+mod model_stats;
 mod rollup;
 
 const TIER_EXTERNAL: u8 = 0;
@@ -2314,6 +2315,7 @@ fn read_sources(
 #[derive(Debug, Clone)]
 pub struct Pricing {
     by_prefix: PrefixIndex,
+    model_stats: model_stats::ModelStatsGrouping,
 }
 
 impl Default for Pricing {
@@ -2328,6 +2330,7 @@ impl Pricing {
     pub fn empty() -> Self {
         Self {
             by_prefix: PrefixIndex::new(),
+            model_stats: model_stats::ModelStatsGrouping::default(),
         }
     }
 
@@ -2367,6 +2370,7 @@ impl Pricing {
                 n.add(plan_bytes(&e.plan)?)?;
             }
         }
+        n.add(self.model_stats.retained_bytes()?)?;
         Ok(n.get())
     }
 
@@ -2400,9 +2404,7 @@ impl Pricing {
 
     /// 从索引恢复（扁平结构，跳过双快照解析与合并）。
     pub fn from_index(index: &PricingIndex) -> Self {
-        let mut pricing = Self {
-            by_prefix: PrefixIndex::new(),
-        };
+        let mut pricing = Self::empty();
         for e in &index.entries {
             // F05：plan 与旧扁平字段统一归一成完整计划后校验——独立恢复
             // 通道同样不留未校验入口。非法条目跳过（load_cached 已在索引
@@ -2475,6 +2477,7 @@ impl Pricing {
         if let Some(text) = reads.modelsdev.text.as_deref() {
             match crate::modelsdev::parse_snapshot_text(text) {
                 Ok(snapshot) => {
+                    pricing.model_stats = model_stats::ModelStatsGrouping::from_snapshot(&snapshot);
                     raw_modelsdev_count = snapshot.entries.len();
                     modelsdev_synced_at = Some(snapshot.synced_at.clone());
                     for e in snapshot.entries {
@@ -3166,11 +3169,17 @@ impl Pricing {
         best.and_then(|e| e.name.clone())
     }
 
-    /// v0.9.4：规范模型身份（查询时派生，升级零迁移）。
+    /// 模型统计分组键：聚合、图表数据、模型下钻、CCS 日行展示与下钻指纹共用。
+    /// 不参与逐条计价、请求身份或 CCS 覆盖桶取证。
+    pub fn model_stats_key(&self, model: &str) -> String {
+        self.model_stats.key_for(model)
+    }
+
+    /// v0.9.4 规范模型身份：保留为 CCS 覆盖证据；仅旧偏好的显式迁移读取旧键关系。
     ///
     /// 在结构身份键之上确认渠道别名，使同一模型版本的不同写法
     /// （`anthropic/claude-fable-5.2` 与 `claude-fable-5-2`）共享同一
-    /// 分组/覆盖/下钻身份。确认关系有三类，按优先级：
+    /// 覆盖身份。本规则不引入统计展示新增的渠道/计费档归并。按优先级：
     /// - (c) [`CONFIRMED_MODEL_ALIASES`] 里**已核实的别名对**：与价格目录
     ///   无关，候选增删/乱序/缺少快照都成立；
     /// - (a) 结构键本身等于某 models.dev 条目的完整 ID → 原样（本身即规范）；
@@ -3346,7 +3355,7 @@ impl Pricing {
         }
         // 索引文件命中（D2/F10 接线）：签名一致且版本为当前格式（R01：
         // v4/v5 可能携带错误的缓存价语义，拒绝读取、强制重建）→
-        // 免解析双快照，毫秒级恢复完整价格表（含诊断）。
+        // 恢复价格候选（含诊断）；目录元数据仍必须通过 models.dev 完整校验。
         // 索引被拒时的重建原因（见下）随本次结果返回给调用方。
         let mut index_rebuild_note: Option<String> = None;
         if let Ok(Some(index)) = load_index(index_path)
@@ -3373,7 +3382,14 @@ impl Pricing {
             // 保证候选计数与诊断口径一致。
             let has_empty_key = index.entries.iter().any(|e| empty_model_key(&e.display));
             if !has_invalid && !stale_keys && !has_empty_key {
-                let arc = std::sync::Arc::new(Self::from_index(&index));
+                let mut pricing = Self::from_index(&index);
+                if let Some(text) = reads.modelsdev.text.as_deref()
+                    && let Ok(snapshot) = crate::modelsdev::parse_snapshot_text(text)
+                {
+                    // 旧价格索引无须升级：用同一签名下冻结的目录元数据恢复展示键。
+                    pricing.model_stats = model_stats::ModelStatsGrouping::from_snapshot(&snapshot);
+                }
+                let arc = std::sync::Arc::new(pricing);
                 *guard = Some((sig.clone(), arc.clone(), index.warnings.clone()));
                 return (arc, sig, index.warnings, true);
             }
@@ -4235,6 +4251,7 @@ mod tests {
                 SnapshotEntry {
                     id: "prov/tiered".into(),
                     name: None,
+                    canonical_model_id: None,
                     input: Some(4.0),
                     output: Some(20.0),
                     cache_read: Some(0.4),
@@ -4247,6 +4264,7 @@ mod tests {
                 SnapshotEntry {
                     id: "prov/bad-seg".into(),
                     name: None,
+                    canonical_model_id: None,
                     input: Some(1.0),
                     output: Some(2.0),
                     cache_read: None,
@@ -4381,6 +4399,7 @@ mod tests {
                 SnapshotEntry {
                     id: "prov/partial".into(),
                     name: None,
+                    canonical_model_id: None,
                     input: Some(1.0),
                     output: Some(2.0),
                     cache_read: None,
@@ -4393,6 +4412,7 @@ mod tests {
                 SnapshotEntry {
                     id: "prov/free-cache".into(),
                     name: None,
+                    canonical_model_id: None,
                     input: Some(1.0),
                     output: Some(2.0),
                     cache_read: Some(0.0),
@@ -4498,6 +4518,7 @@ mod tests {
             entries: vec![SnapshotEntry {
                 id: "prov/partial".into(),
                 name: None,
+                canonical_model_id: None,
                 input: Some(1.0),
                 output: Some(2.0),
                 cache_read: None,
@@ -4636,6 +4657,7 @@ mod tests {
             v: 2,
             synced_at: "t".into(),
             entries: vec![MdEntry {
+                canonical_model_id: None,
                 id: "prov/legacy".into(),
                 name: None,
                 input: Some(1.0),

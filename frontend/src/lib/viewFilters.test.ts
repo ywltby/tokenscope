@@ -7,6 +7,7 @@ import {
   DEFAULT_VIEW_FILTERS,
   VIEW_FILTERS_KEY,
   loadViewFilters,
+  loadViewFilterState,
   normalizeViewFilters,
   saveViewFilters,
   viewFiltersEqual,
@@ -17,6 +18,23 @@ beforeEach(() => {
 });
 
 describe("筛选偏好校验与持久化（U04）", () => {
+  it("只有旧模型偏好需要迁移，新保存及非模型偏好不执行兼容", () => {
+    const filters = {
+      ...DEFAULT_VIEW_FILTERS,
+      drill: { type: "model" as const, key: "opencodego/spacebunny" },
+    };
+    localStorage.setItem(VIEW_FILTERS_KEY, JSON.stringify(filters));
+    expect(loadViewFilterState().legacyModel).toBe(true);
+    saveViewFilters(filters);
+    expect(loadViewFilterState().legacyModel).toBe(false);
+    saveViewFilters(filters, 0);
+    expect(loadViewFilterState().legacyModel).toBe(true);
+    localStorage.setItem(
+      VIEW_FILTERS_KEY,
+      JSON.stringify({ ...filters, drill: { type: "day", key: "2026-05-28" } }),
+    );
+    expect(loadViewFilterState().legacyModel).toBe(false);
+  });
   it("defaults_when_missing_or_broken：缺失、非法 JSON、半非法对象都回退默认", () => {
     expect(loadViewFilters()).toEqual(DEFAULT_VIEW_FILTERS);
 

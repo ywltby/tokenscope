@@ -117,6 +117,22 @@ describe("chartData 显示元数据（设计系统 Task 4）", () => {
     expect(titles.join("|")).not.toContain("claudeopus55");
   });
 
+  it("模型图每组画一根四桶堆叠柱，不按同名标签合并", () => {
+    const groups = [
+      { ...g("tencent/hy3", 4200, 880, 245, 320), label: "Hy3" },
+      { ...g("unknown/hy3", 100), label: "Hy3" },
+    ];
+    const chart = buildBarChartData(groups, "model");
+    expect(chart.categories).toEqual(["Hy3", "Hy3"]);
+    expect(chart.series.map((s) => s.values)).toEqual([
+      [4200, 100],
+      [880, 0],
+      [245, 0],
+      [320, 0],
+    ]);
+    expect(fullLabels(groups, "model")).toEqual(["tencent/hy3", "unknown/hy3"]);
+  });
+
   it("tooltipLabels：项目维度保留完整路径（长名不在轴上省略）", () => {
     const groups = [g("C:/work/very-long-project-name/alpha-service", 10)];
     const titles = tooltipLabels(groups, "project");

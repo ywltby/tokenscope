@@ -272,7 +272,7 @@ function eventRow(i, opts = {}) {
     cache_read: 0,
     cost_usd: opts.cost_usd === undefined ? 0.0126 : opts.cost_usd,
     cost_breakdown: opts.breakdown === null ? null : breakdown(opts.cost_usd ?? 0.0126),
-    // v0.9.4：下钻按规范身份键筛选（后端 canonical_identity_key），明细仍显示
+    // 下钻按后端统计分组键筛选（model_stats_key），明细仍显示
     // 原始渠道 ID。identity 缺省时退回 model（与旧 fixture 逐字节兼容）。
     ...(opts.identity ? { identity: opts.identity } : {}),
     // v0.9.4：该请求用量已计入当日汇总（B 类覆盖标记）。
@@ -817,6 +817,57 @@ const ROLLUP_DRILL_PROJECT_GROUPS = [
   }),
 ];
 
+const HY3_KEY = "tencent/hy3";
+const HY3_STATS_GROUPS = [
+  group(HY3_KEY, 4200, {
+    label: "Hy3",
+    requests: 6,
+    output: 880,
+    cache_write: 245,
+    cache_read: 320,
+    cost_usd: 0.0031,
+    source_cost_usd: 1.25,
+    total_cost_usd: 1.2531,
+    source_cost_state: "full",
+    cost_detail: "mixed",
+    unknown_pricing: true,
+    unknown_tokens: { input: 0, output: 0, cache_write: 150, cache_read: 0 },
+    cost_partially_unknown: true,
+  }),
+];
+
+function hy3Request(i, model, agent, tokens, rates) {
+  const ts = `2026-05-28 ${i + 10}:00:00`;
+  const row = eventRow(i, { model, agent, identity: HY3_KEY });
+  const lines = ["input", "output", "cache_write", "cache_read"].map((kind, n) => ({
+    kind,
+    tokens: tokens[n],
+    unit_price: rates[n],
+    subtotal: (tokens[n] * rates[n]) / 1e6,
+    priced: rates[n] != null,
+  }));
+  const unknown = Object.fromEntries(lines.map((l) => [l.kind, l.priced ? 0 : l.tokens]));
+  const cost = lines.reduce((sum, l) => sum + l.subtotal, 0);
+  return {
+    ...row,
+    ts,
+    cursor: `${ts}|${row.record_id}`,
+    input: tokens[0],
+    output: tokens[1],
+    cache_write: tokens[2],
+    cache_read: tokens[3],
+    cost_usd: cost,
+    cost_breakdown: {
+      ...breakdown(cost),
+      matched: { ...breakdown(cost).matched, raw_key: model },
+      basis_value: tokens[0] + tokens[2] + tokens[3],
+      lines,
+      unknown,
+      complete: Object.values(unknown).every((n) => !n),
+    },
+  };
+}
+
 /** 明细行：与汇总同源（empty → 零行；unknown → 未知价行；partial → 混合）。 */
 function rowsFor(kind) {
   switch (kind) {
@@ -858,6 +909,31 @@ function rowsFor(kind) {
       return Array.from({ length: 8 }, (_, i) =>
         eventRow(i + 1, { model: `model-${String(i).padStart(2, "0")}` }),
       );
+    case "legacy-model-drill":
+      return [eventRow(1, { model: "spacebunny", identity: "spacebunny" })];
+    case "legacy-model-ambiguous":
+      return [
+        eventRow(1, { model: "spacebunny", identity: "spacebunny" }),
+        eventRow(2, { model: "opencode-go/spacebunny", identity: "opencodego/spacebunny" }),
+      ];
+    case "hy3-stats":
+      return [
+        hy3Request(3, "tencent/hy3:free", "claude-code", [200, 80, 5, 20], [0, 0, 0, 0]),
+        hy3Request(2, HY3_KEY, "claude-code", [0, 0, 150, 0], [2, 5, null, 1]),
+        hy3Request(1, "hy3", "workbuddy", [1000, 200, 0, 100], [2, 5, null, 1]),
+        rollupRow("2026-05-28", {
+          model: HY3_KEY,
+          label: "Hy3",
+          models: ["tencent/hy3:free"],
+          requests: 3,
+          input: 3000,
+          output: 600,
+          cache_write: 90,
+          cache_read: 200,
+          cost_usd: 1.25,
+          source_cost_usd: 1.25,
+        }),
+      ];
     case "rollup-drill":
       // 行序镜像后端两段：事件段（原生请求）在前，日汇总段在后。
       return [
@@ -938,6 +1014,22 @@ function rowsFor(kind) {
 }
 
 function dimGroups(kind, by, session) {
+  if (kind === "legacy-model-drill" || kind === "legacy-model-ambiguous") {
+    return rowsFor(kind).map((r) =>
+      group(r.identity ?? r.model, r.input, {
+        label: r.model === "spacebunny" ? "Space Bunny" : "Space Bunny hosted",
+        output: r.output,
+        requests: 1,
+        cost_usd: r.cost_usd,
+        total_cost_usd: r.cost_usd,
+      }),
+    );
+  }
+  if (kind === "hy3-stats") {
+    return by === "day"
+      ? [{ ...HY3_STATS_GROUPS[0], key: "2026-05-28", label: null }]
+      : HY3_STATS_GROUPS;
+  }
   const base =
     kind === "multi"
       ? MULTI_GROUPS
@@ -1193,10 +1285,14 @@ function createSessionTable(cfg) {
     if (!s) return reject(`query_expired: 会话 ${id} 不存在或已失效，请刷新重试`);
     const rows = s.frozenRows;
     const before = args?.before ?? null;
-    // 下钻过滤与后端一致（模型/项目/日）。v0.9.4：模型按规范身份键命中
+    const migrate = args?.migrateLegacyModel === true;
+    if (migrate && (before != null || typeof args.model !== "string" || !args.model))
+      return reject("旧模型下钻只允许在模型首页迁移");
+    const model = migrate ? (cfg.legacyModelTargets?.[args.model] ?? null) : args?.model;
+    // 下钻过滤与后端一致（模型/项目/日）。模型按统计分组键命中
     // （identity 缺省退回 model），明细行仍保留原始渠道 ID 供展示。
     let scoped = rows;
-    if (args?.model) scoped = scoped.filter((r) => (r.identity ?? r.model) === args.model);
+    if (model) scoped = scoped.filter((r) => (r.identity ?? r.model) === model);
     // v0.9.4 补修二：日汇总行没有项目归属，只命中「未知」筛选（与聚合分组
     // 同一判定）；具体项目仍只匹配有该项目归属的请求行。
     if (args?.project)
@@ -1228,6 +1324,7 @@ function createSessionTable(cfg) {
       rows: page,
       total: scoped.length,
       warnings: [],
+      ...(migrate ? { model_filter_migration: { from: args.model, to: model } } : {}),
     };
   }
 
@@ -1273,6 +1370,7 @@ export function buildFixture(name) {
       by === "model" && modelGroups ? modelGroups : dimGroups(cfg.kind, by, session),
     pageSize: cfg.pageSize ?? 2,
     expireAfterPages: cfg.expireAfterPages ?? Infinity,
+    legacyModelTargets: cfg.legacyModelTargets,
   });
 
   // 挂起响应：key → {resolve, reject}，由测试在确定时刻 settle。
@@ -1653,6 +1751,15 @@ const SCENARIOS = {
   "source-cost": { kind: "source-cost" },
   // v0.9.4：跨渠道别名合并 + CCS 日汇总下钻（混合分页 pageSize=2）。
   "rollup-drill": { kind: "rollup-drill", pageSize: 2 },
+  "hy3-stats": { kind: "hy3-stats", pageSize: 2 },
+  "legacy-model-drill": {
+    kind: "legacy-model-drill",
+    legacyModelTargets: { "opencodego/spacebunny": "spacebunny" },
+  },
+  "legacy-model-ambiguous": {
+    kind: "legacy-model-ambiguous",
+    legacyModelTargets: { "opencodego/spacebunny": null },
+  },
   // AC08 归因补修：长路径换行断言需要长路径行在列表里——PR3 起默认行
   // 是短路径（SOURCE_ROWS_DEFAULT），必须声明 merged 才含 LONG_SOURCE_DIR
   // 行；此前全矩阵未在本地跑过，该缺口未被察觉。

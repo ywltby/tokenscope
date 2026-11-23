@@ -24,6 +24,7 @@ export interface ViewFilters {
 }
 
 export const VIEW_FILTERS_KEY = "tokenscope-view-filters";
+export const MODEL_KEY_VERSION = 1;
 
 export const DEFAULT_VIEW_FILTERS: ViewFilters = {
   by: "day",
@@ -71,19 +72,33 @@ export function normalizeViewFilters(value: unknown): ViewFilters {
 
 /** 启动同步读取：缺失、JSON 损坏、存储不可用都回默认。 */
 export function loadViewFilters(onError?: (e: unknown) => void): ViewFilters {
+  return loadViewFilterState(onError).filters;
+}
+
+/** 偏好键修订与视图快照独立；只为升级前保存的模型下钻开启一次兼容路径。 */
+export function loadViewFilterState(onError?: (e: unknown) => void): {
+  filters: ViewFilters;
+  legacyModel: boolean;
+} {
   const raw = readItem(VIEW_FILTERS_KEY, onError);
-  if (raw == null) return { ...DEFAULT_VIEW_FILTERS };
+  if (raw == null) return { filters: { ...DEFAULT_VIEW_FILTERS }, legacyModel: false };
   try {
-    return normalizeViewFilters(JSON.parse(raw));
+    const value = JSON.parse(raw);
+    const filters = normalizeViewFilters(value);
+    const version = typeof value?.modelKeyVersion === "number" ? value.modelKeyVersion : 0;
+    return { filters, legacyModel: filters.drill?.type === "model" && version < MODEL_KEY_VERSION };
   } catch {
-    return { ...DEFAULT_VIEW_FILTERS };
+    return { filters: { ...DEFAULT_VIEW_FILTERS }, legacyModel: false };
   }
 }
 
 /** 写入（存储不可用只降级不抛错，返回是否落盘）。 */
-export function saveViewFilters(filters: ViewFilters): boolean {
+export function saveViewFilters(
+  filters: ViewFilters,
+  modelKeyVersion = MODEL_KEY_VERSION,
+): boolean {
   const payload: ViewFilters = { ...filters, preset: canonicalPreset(filters.preset) };
-  return writeItem(VIEW_FILTERS_KEY, JSON.stringify(payload));
+  return writeItem(VIEW_FILTERS_KEY, JSON.stringify({ ...payload, modelKeyVersion }));
 }
 
 /** 逐项相等（预设按身份键、下钻按类型与键；label 只是文案，不参与）。 */

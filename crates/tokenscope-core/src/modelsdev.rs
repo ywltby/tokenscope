@@ -34,6 +34,20 @@ struct ApiModel {
     name: Option<String>,
     #[serde(default)]
     cost: Option<ApiCost>,
+    #[serde(default, deserialize_with = "deserialize_canonical_id")]
+    canonical_model_id: Option<String>,
+}
+
+/// 展示身份元数据不是计价输入。上游未发或类型不符时弃用该证据，不能因此
+/// 使原本可用的价格候选/快照失效。
+pub(crate) fn deserialize_canonical_id<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(id) => Some(id),
+        _ => None,
+    })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -152,6 +166,13 @@ pub struct SnapshotEntry {
     /// `provider/model` 原始 id（展示用）。
     pub id: String,
     pub name: Option<String>,
+    /// 由上游 base_model 导出的基础 ID，仅用于模型统计分组。旧 v4 快照可缺省。
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_canonical_id"
+    )]
+    pub canonical_model_id: Option<String>,
     pub input: Option<f64>,
     pub output: Option<f64>,
     pub cache_read: Option<f64>,
@@ -258,6 +279,7 @@ pub(crate) fn sync_with(
                 // MP03：name 只取**模型级**字段——provider 名不是模型展示名，
                 // 不得兜底（旧实现会在模型无 name 时写入供应商名称）。
                 name: m.name,
+                canonical_model_id: m.canonical_model_id,
                 input: cost.input,
                 output: cost.output,
                 cache_read: cost.cache_read,
@@ -491,6 +513,7 @@ mod tests {
                             cache_write_1h: None,
                             id: format!("{provider}/{id}"),
                             name: m.name,
+                            canonical_model_id: m.canonical_model_id,
                             input: c.input,
                             output: c.output,
                             cache_read: c.cache_read,
@@ -686,6 +709,7 @@ mod tests {
             entries: vec![SnapshotEntry {
                 id: "volcengine/doubao-seed-2-0-pro-260215".into(),
                 name: Some("Doubao Seed 2.0 Pro".into()),
+                canonical_model_id: None,
                 input: Some(0.47),
                 output: Some(2.37),
                 cache_read: Some(0.09),

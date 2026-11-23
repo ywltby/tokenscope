@@ -18,8 +18,7 @@ function startFrameProbe() {
   window.__segmentIds = new WeakMap();
   let nextId = 0;
   const rect = (r) => ({ x: r.left, y: r.top, width: r.width, height: r.height });
-  const sample = () => {
-    if (!window.__segmentProbe) return;
+  const collect = () => {
     const groups = [...document.querySelectorAll(".ts-segmented")].flatMap((group) => {
       const box = group.getBoundingClientRect();
       const button = group.querySelector('.ts-segmented-item[aria-checked="true"]');
@@ -65,7 +64,43 @@ function startFrameProbe() {
         },
       ];
     });
+    return groups;
+  };
+  /** 在等待结束时同步读一次真实终态：rAF 最后一帧可能早于合成器落定不足 1px。 */
+  window.__segmentSampleNow = () => {
+    const groups = collect();
     if (groups.length) window.__segmentFrames.push({ at: performance.now(), groups });
+    return groups.length;
+  };
+  /**
+   * 等待指定分段的滑动层与选中按钮真实对齐（上限 timeout ms）。
+   * CI 负载下 CSS 过渡可能比 200ms 更晚才开始/结束；只等待、不改阈值——
+   * 超时仍返回 false，由原有断言失败。中间帧已由持续采样保留。
+   */
+  window.__segmentWaitAligned = (id, timeout) =>
+    new Promise((resolve) => {
+      const started = performance.now();
+      const tick = () => {
+        const g = collect().find((x) => x.id === id);
+        const layer = g?.layers.length === 1 ? g.layers[0] : null;
+        if (
+          layer &&
+          ["x", "y", "width", "height"].every((key) => Math.abs(layer[key] - g.button[key]) <= 0.25)
+        ) {
+          resolve(true);
+          return;
+        }
+        if (performance.now() - started > timeout) {
+          resolve(false);
+          return;
+        }
+        requestAnimationFrame(tick);
+      };
+      tick();
+    });
+  const sample = () => {
+    if (!window.__segmentProbe) return;
+    window.__segmentSampleNow();
     requestAnimationFrame(sample);
   };
   requestAnimationFrame(sample);
@@ -110,7 +145,11 @@ async function switchSample(ctx, session, locator, id, key, reduced, label) {
     await locator.focus();
     await page.keyboard.press(key);
   } else await locator.click();
-  await page.waitForTimeout(320);
+  // 0.2s 动画已结束：等待滑动层与按钮真实对齐（上限 2s），再同步采样终态。
+  // CI 负载下过渡可能晚开始；只等待不改 0.25px，超时仍由下方断言失败。
+  // 等待前后的持续 rAF 采样仍保留中间帧证据。
+  await page.evaluate((segment) => window.__segmentWaitAligned?.(segment, 2000), id);
+  await page.evaluate(() => window.__segmentSampleNow?.());
   const data = samples(await frames(page), id);
   const first = data[0];
   const last = data.at(-1);

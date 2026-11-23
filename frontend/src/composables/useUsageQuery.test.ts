@@ -32,7 +32,7 @@ import {
   snapshotQueueIdle,
   SNAPSHOT_VERSION,
 } from "../lib/viewSnapshot";
-import { VIEW_FILTERS_KEY } from "../lib/viewFilters";
+import { MODEL_KEY_VERSION, VIEW_FILTERS_KEY } from "../lib/viewFilters";
 import type { EventList, Group, SummaryReport } from "../types";
 
 function group(key: string, input: number): Group {
@@ -135,7 +135,14 @@ function lastBegin(): Record<string, unknown> {
 function setPreferences(preset: unknown, drill: unknown = null): void {
   localStorage.setItem(
     VIEW_FILTERS_KEY,
-    JSON.stringify({ by: "model", agent: "codex", preset, rollupsMode: "auto", drill }),
+    JSON.stringify({
+      by: "model",
+      agent: "codex",
+      preset,
+      rollupsMode: "auto",
+      drill,
+      modelKeyVersion: MODEL_KEY_VERSION,
+    }),
   );
 }
 
@@ -866,6 +873,7 @@ describe("useUsageQuery 快照首帧（U04）", () => {
         preset: null,
         rollupsMode: "auto",
         drill: { type: "model", key: "m1" },
+        modelKeyVersion: MODEL_KEY_VERSION,
       }),
     );
     invokeMock.mockImplementation((cmd: string) => {
@@ -930,7 +938,10 @@ describe("useUsageQuery 快照首帧（U04）", () => {
       preset: null,
       drill: { type: "model", key: "m1" },
     };
-    localStorage.setItem(VIEW_FILTERS_KEY, JSON.stringify({ ...filters, rollupsMode: "auto" }));
+    localStorage.setItem(
+      VIEW_FILTERS_KEY,
+      JSON.stringify({ ...filters, rollupsMode: "auto", modelKeyVersion: MODEL_KEY_VERSION }),
+    );
     okMock({
       view_cache_load: () => Promise.resolve({ ...snapshotPayload(reportA, filters), v: 21 }),
       query_summary: () => new Promise<SummaryReport>(() => {}), // 首次查询挂起
