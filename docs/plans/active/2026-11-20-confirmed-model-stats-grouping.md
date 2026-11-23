@@ -1,7 +1,7 @@
 # 已确认的同模型渠道与计费档合并展示
 
 - 分支：`fix/confirmed-model-stats-grouping`，自 `origin/main` `f0fc12eb059fcbfb12838bc4505954bdc68cfca5`（v0.9.6、视图快照 v22）。
-- 状态：初始修复 `d25993e`、两处复核补修 `12f8579` 与分段控件终态采样修复 `fa5e657` / `7b9ba12` 均已正常钩子提交；PR [#78](https://github.com/ywltby/tokenscope/pull/78)。代码 HEAD **`7b9ba12`** 的必需检查全绿。最终回填文档提交只改计划，其门禁以 PR 最新 HEAD 实跑为准。**停在可审查状态**：不合并、不发布、不安装。
+- 状态：初始修复 `d25993e`、两处复核补修 `12f8579` 与分段控件终态采样修复 `fa5e657` / `7b9ba12` 均已正常钩子提交；PR [#78](https://github.com/ywltby/tokenscope/pull/78) 已于 2026-11-23 以 merge commit `9647ca1391004a983591abda16aa64fe2d8a3d7b` 合并。PR 最终代码 HEAD **`39257712ccdc15e285e30aae964a62fd4f7938d3`** 的必需检查全绿（三个检查运行的 head_sha 均为该 SHA），v0.9.7 已由 Release 发布为公开预发布。合并、发布与核验结果见 §7。
 - 发行版本：仓库工具取号 **0.9.7**；已核对并登记 v0.9.6 原发布资产作为上一版升级基线。基线选择为 0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 / 0.6.0 / 0.9.6（present/deleted 共 12 组）。
 
 ## 1. 问题与不变量
@@ -63,7 +63,7 @@
 - 关系检查跨越当前日期范围，但使用当前查询冻结的历史与价格，不读取查询后新增的数据；因此「键可确认但当前日期无请求」保留有效筛选，不与失效混为一谈。兼容路径不接入日常模型分组/匹配、逐条计价或 CCS 覆盖；新保存的偏好及第二次启动不再进入该路径。
 - **目录校验**：`ModelStatsGrouping` 改为消费 `modelsdev::parse_snapshot_text` 已通过校验和旧格式兼容处理的 `Snapshot`，不再另设宽松的原始文本解析器；冷加载和索引恢复均使用同一入口。整份快照无效时仅保留明确映射；可选 `canonical_model_id` 的单条格式错误仍只忽略该字段，合法费率不丢失。
 - 红-first：合成 Space Bunny 请求 + 预存 `opencodego/spacebunny`，先证明旧筛选首次打开 0 行、新键 1 行；无效 `v="nonsense"` 先复现有加载警告却仍合并 Gemma。随后覆盖偏好歧义/缺失回退、二次启动、新偏好、空日期范围、冷加载/索引恢复、可选字段错误及旧格式。既有 Hy3 离线、费用、CCS 覆盖、下钻分页和浏览器契约保留。
-- 本节结果与 PR/最新 HEAD 门禁在完成后追加；本次仍不合并、不发布、不安装。
+- 本节结果与 PR 最新 HEAD 门禁见 §6.2 与 §7；合并、发布结果以 §7 为准（当时状态：不合并、不发布）。
 
 ### 6.1 红 → 绿结果
 
@@ -87,3 +87,14 @@
   - 最终代码 HEAD **[`7b9ba12491150062dffc211a0b56e710dc23804a`](https://github.com/ywltby/tokenscope/pull/78/commits/7b9ba12491150062dffc211a0b56e710dc23804a)** 的必需检查全绿（[CI](https://github.com/ywltby/tokenscope/actions/runs/45157592798) rust 6m4s / rust-acceptance 5m53s / contracts 9m32s / frontend 10m17s / **gate pass**；[Install test](https://github.com/ywltby/tokenscope/actions/runs/45157592910) install-test 8m11s、12 组单跳升级（含 0.9.6）全 pass；[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/45157592899) native-ui 11m51s）。
   - 之后仅回填本计划的纯文档提交不改产品；其 PR 最新 HEAD 检查在交付回复中核对。已有 `fa5e657` 的 [CI](https://github.com/ywltby/tokenscope/actions/runs/45150878718) / [Install](https://github.com/ywltby/tokenscope/actions/runs/45150878653) / [Native](https://github.com/ywltby/tokenscope/actions/runs/45150878616) 仅作历史记录。
   - 本地 `bump_version.py --check --base-ref origin/main` = **0.9.7 / patch / base `f0fc12e` / release true**。
+
+## 7. 合并、发布与核验回填（2026-11-23）
+
+- **合并前复核**：PR #78 state OPEN / mergeable MERGEABLE / mergeStateStatus CLEAN，headRefOid 仍为已复核的 `39257712ccdc15e285e30aae964a62fd4f7938d3`（无漂移）；CI [45159591104](https://github.com/ywltby/tokenscope/actions/runs/45159591104)、Install test [45159591072](https://github.com/ywltby/tokenscope/actions/runs/45159591072)、Native UI [45159591117](https://github.com/ywltby/tokenscope/actions/runs/45159591117) 三个运行的 head_sha 均为该 SHA 且 conclusion success，20 项必需检查通过，`upgrade-chain` 按设计 skipping。`python -B scripts/bump_version.py --check --base-ref origin/main` = 0.9.7 / patch / base `f0fc12e` / release true；v0.9.6 升级基线已登记（commit `f0fc12e`），`select --current-version 0.9.7` 起点 0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 / 0.6.0 / 0.9.6。本机对基线的 `upgrade_baselines.py check` 因代理 TLS 瞬断未通过（传输层，非登记缺失），CI gate 已在 GitHub Runner 上通过同一校验。
+- **合并**：用户独立授权后以 `gh pr merge 78 --merge --match-head-commit 39257712ccdc15e285e30aae964a62fd4f7938d3` 普通合并为 merge commit **`9647ca1391004a983591abda16aa64fe2d8a3d7b`**（父提交 `f0fc12e` + `3925771`），PR 状态 MERGED。
+- **Release**：合并提交触发 [Release 45190806275](https://github.com/ywltby/tokenscope/actions/runs/45190806275) **19 个作业全部 success、无跳过**：gate、build、plan-upgrades、install-test、present/deleted 两条连续升级链、12 组单跳升级矩阵（0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 / 0.6.0 / 0.9.6 × present/deleted）、publish。安装、真实起点升级与连续链实跑全部在 GitHub-hosted 一次性 Runner 的隔离环境完成，保留真实 history.db 与 CCS 数据来源副本；本机只下载产物校验，未安装、未触碰真实用户数据。
+- **同提交 main 工作流**：[CI 45190806151](https://github.com/ywltby/tokenscope/actions/runs/45190806151) 的 rust / rust-acceptance / contracts / frontend / gate 五作业全部 success（与 v0.9.6 的 frontend 末帧失败不同，本批全绿）。[Native UI E2E 45190806223](https://github.com/ywltby/tokenscope/actions/runs/45190806223) **失败**：仅一个 native-ui 作业，步骤 6「Real WebView2 and Rust refresh lifecycle」（ui-refresh）在启动阶段失败、退出码 1；步骤 7–19（窗口恢复与设置持久化、采集状态、来源路径、项目/模型身份、CCS 导入、定价同步、隐私与同意、AC10 单实例等 13 个场景）因作业失败被跳过，未执行。
+- **Native UI 失败证据与实际原因**：按已上传的 `native-ui-evidence`（artifact 14826466054）`ui-refresh/evidence.json` 与运行日志，`failure_stage=setup`、`failure=启动预算 45000 ms 用尽（已用 45012 ms）`，`stage_ms.spawn=7`、`cdp_ready=null`；startup_events 显示 window_build_started 3ms → window_build_finished 42515ms → navigation_requested 42516ms → page_load_finished 42992ms，45s 预算内 CDP 端口 9452 持续 ECONNREFUSED，预算耗尽后才捕获到 runtime_version/page target（`observation=observer-disagreement`）。9 项前置检查（隔离、构建身份、退出确认、追踪路径、外部连接、真实数据未触碰、CSP）通过，`failed=[]`、`pending=[]`，但业务断言未开始。证据足以确认失败发生在启动/CDP 连接预算边界（超 12ms），不足以判定是测试架/Runner 负载还是产品启动性能问题，**根因保留未确认**；未放宽 45s 预算或任何断言，未用重跑通过代替原因，产品门禁与断言原样保留。
+- **发布身份与资产**：[v0.9.7](https://github.com/ywltby/tokenscope/releases/tag/v0.9.7) 已公开（isDraft false、isPrerelease true，不会标为 latest）；标签直接解引用合并提交 `9647ca1`；`build-metadata.json`（schema 2）的 commit=`9647ca1391004a983591abda16aa64fe2d8a3d7b`、version=0.9.7，persistent_format 与 v0.9.6 相同（cache 12 / history 5 / parser 3 / identity 1 / pricing 11 / settings 3）。四项资产齐全：安装包、SHA256SUMS.txt、build-metadata.json、provenance.sigstore.json。下载后重算完整 SHA256：安装包 `62019335628f91d408e09dfcb925521103ef9f35a5797c88c17132d7378bd6fd`，与 `SHA256SUMS.txt` 及 GitHub 资产 digest 三方一致；SHA256SUMS.txt `433cc0c0be4eff78c38b75b5784d2429f5ced3483fd9f144e63780c7696aa314`、build-metadata.json `476fe542ec0ab948ed3e1074cd6d2af0ddbbe5922a3c619e6b3063ca51d1fb69`、provenance.sigstore.json `0f9ec9aea5c2eec3c4f98c6ab06ae4ef50434096ebecc72f7f4702d538d41886` 均与 GitHub 资产 digest 一致。标签与资产不可变，未覆盖已有产物。
+- **下一批基线**：`python -B scripts/upgrade_baselines.py add --tag v0.9.7` 已登记为 published（脚本逐个下载并核对四项资产哈希后写入），`select --current-version 0.9.8` 起点为 0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 / 0.6.0 / 0.9.7，present/deleted 共 12 组。发布记录提交本身版本不变，`bump_version.py --check` = release: false，main push 的 Release 只跑 gate，不重复发版。
+- **边界**：本机未安装、未运行或升级任何本机安装；真实 `~/.tokenscope` / history.db / CCS 数据未触碰。Native UI 上述失败与未执行场景、真实跨午夜/休眠/跨显示器人工验收仍为未验证项。

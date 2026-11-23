@@ -1,13 +1,15 @@
 # TokenScope 计划与完成状态总账
 
-> 更新日期：2026-11-20。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
+> 更新日期：2026-11-23。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
 > 唯一当前待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)。真实跨午夜、长时间休眠、跨显示器在[独立系统验收待办](system-acceptance-todo.md)维护，均未排期、未标通过。[审计索引](audits/README.md)保留历史时点结论。
 
 ## 现在执行什么
 
+**2026-11-23 v0.9.7 已发布：已确认的模型渠道与计费档合并展示、旧模型下钻偏好自动迁移、拒绝损坏价格快照的别名**：[实施计划](active/2026-11-20-confirmed-model-stats-grouping.md)。WorkBuddy `hy3` 与 CCS `tencent/hy3:free` 合并为一行一柱 Hy3（请求明细保留原始 ID、仍逐条计价），旧 Space Bunny 下钻偏好首次查询按冻结关系唯一映射自动迁移（缺失/歧义只清模型键），损坏的 models.dev 快照不再提供目录别名（明确映射保留）。PR #78 以 `--match-head-commit` 绑定复核 HEAD `3925771` 合并为 `9647ca1`；[Release 45190806275](https://github.com/ywltby/tokenscope/actions/runs/45190806275) 19 作业全成功无跳过（构建、安装测试、12 组单跳、present/deleted 两条连续升级链、publish），[同提交 main CI](https://github.com/ywltby/tokenscope/actions/runs/45190806151) 全绿；[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/45190806223) 的 ui-refresh 在启动阶段 CDP 预算 45000ms 用尽（45012ms）失败、后续 13 场景跳过，根因未确认、保留未确认状态。[v0.9.7](https://github.com/ywltby/tokenscope/releases/tag/v0.9.7) 预发布已公开，标签解引用与 `build-metadata.json` 均指向 `9647ca1`，安装包 SHA256 `62019335…1fb69` 下载后与 `SHA256SUMS.txt` 及 GitHub 资产 digest 三方一致，四项资产齐全；v0.9.7 已登记升级基线（`select --current-version 0.9.8` 起点含 0.9.7）。安装与升级验证在 GitHub Runner 隔离环境完成，本机未安装、未触碰真实数据。
+
 **2026-11-21 本地验收通过、准备审查：已确认的模型渠道与计费档合并展示**：[实施计划](active/2026-11-20-confirmed-model-stats-grouping.md)。从 main `f0fc12e` 独立分支，以合成 WorkBuddy `hy3` + CCS `tencent/hy3:free` 先复现两行，再分离统计展示键与既有覆盖证据；只按明确映射或目录基础 ID 合并，逐条计价不变，快照 v22→v23。Rust 1047、前端 1212、16 个具名浏览器契约通过；版本工具取号 0.9.7、登记 v0.9.6 基线。正常钩子、PR 最新 HEAD 门禁以计划交付记录为准，不承接前一 PR 的合并/发布授权。
 
-**2026-11-23 已推送审查：PR [#78](https://github.com/ywltby/tokenscope/pull/78)**，代码 HEAD `7b9ba12` 的必需 CI、12 组升级矩阵与 Native UI 全绿；仍不合并、不发布、不安装。
+**2026-11-23 已推送审查：PR [#78](https://github.com/ywltby/tokenscope/pull/78)**，代码 HEAD `7b9ba12` 的必需 CI、12 组升级矩阵与 Native UI 全绿；仍不合并、不发布、不安装（该条为合并前审查时点状态，最终结果见上条）。
 
 同批复核补修（沿用 0.9.7）见计划 §6：旧 Space Bunny 下钻偏好首次打开 0→1 行，唯一关系迁移、缺失/歧义只清模型、空日期不清有效键；目录别名只从通过现有校验的快照加载，冷加载与索引恢复同口径。两处均先红后绿，原 Hy3/费用/CCS 覆盖及分页保留；最终以本批最新 HEAD 的正常钩子与必需 CI 为准。
 
