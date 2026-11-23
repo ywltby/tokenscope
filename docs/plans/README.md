@@ -7,6 +7,8 @@
 
 **2026-11-21 本地验收通过、准备审查：已确认的模型渠道与计费档合并展示**：[实施计划](active/2026-11-20-confirmed-model-stats-grouping.md)。从 main `f0fc12e` 独立分支，以合成 WorkBuddy `hy3` + CCS `tencent/hy3:free` 先复现两行，再分离统计展示键与既有覆盖证据；只按明确映射或目录基础 ID 合并，逐条计价不变，快照 v22→v23。Rust 1047、前端 1212、16 个具名浏览器契约通过；版本工具取号 0.9.7、登记 v0.9.6 基线。正常钩子、PR 最新 HEAD 门禁以计划交付记录为准，不承接前一 PR 的合并/发布授权。
 
+**2026-11-23 已推送审查：PR [#78](https://github.com/ywltby/tokenscope/pull/78)**（HEAD `fa5e657`）在复核补修后，必需 CI、12 组升级矩阵与 Native UI 全绿；仍不合并、不发布、不安装。
+
 同批复核补修（沿用 0.9.7）见计划 §6：旧 Space Bunny 下钻偏好首次打开 0→1 行，唯一关系迁移、缺失/歧义只清模型、空日期不清有效键；目录别名只从通过现有校验的快照加载，冷加载与索引恢复同口径。两处均先红后绿，原 Hy3/费用/CCS 覆盖及分页保留；最终以本批最新 HEAD 的正常钩子与必需 CI 为准。
 
 **2026-11-20 已合并发布 v0.9.6：分段控件冷启动首帧高亮修复**：[实施计划](active/2026-11-20-segmented-control-cold-start.md)，[PR #77](https://github.com/ywltby/tokenscope/pull/77)。用户独立授权后合并为 `f0fc12e`；[Release](https://github.com/ywltby/tokenscope/actions/runs/44730666373) 与 [Native UI](https://github.com/ywltby/tokenscope/actions/runs/44730666171) 成功，[同提交 main CI](https://github.com/ywltby/tokenscope/actions/runs/44730666163) 的 frontend/gate 因两条切换动画末帧偏差约 0.253px 超过 0.25px 失败（冷启动首帧均过），不记为全绿基线；本机未安装。旧首帧 2px/32px、2px/63px；修复后未测量时按钮材质保底，有效测量后滑动层无动画接管，真正切换才滑动。本轮 Hy3 独立验证、不承接历史合并/发布授权。

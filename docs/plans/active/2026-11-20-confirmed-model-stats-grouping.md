@@ -1,7 +1,7 @@
 # 已确认的同模型渠道与计费档合并展示
 
 - 分支：`fix/confirmed-model-stats-grouping`，自 `origin/main` `f0fc12eb059fcbfb12838bc4505954bdc68cfca5`（v0.9.6、视图快照 v22）。
-- 状态：初始修复已正常钩子提交 `d25993e`；两处复核补修已定向验证，准备最终完整钩子与 PR 审查；不合并、不发布、不安装。
+- 状态：初始修复 `d25993e`、两处复核补修 `12f8579` 与分段控件末帧采样修复 `fa5e657` 均已正常钩子提交；PR [#78](https://github.com/ywltby/tokenscope/pull/78) 最新 HEAD `fa5e657` 的必需检查全绿。**停在可审查状态**：不合并、不发布、不安装。
 - 发行版本：仓库工具取号 **0.9.7**；已核对并登记 v0.9.6 原发布资产作为上一版升级基线。基线选择为 0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 / 0.6.0 / 0.9.6（present/deleted 共 12 组）。
 
 ## 1. 问题与不变量
@@ -79,4 +79,9 @@
 - Rust 定向 **33 例通过**：本轮 `confirmed_model_stats` 10 例，加 Fable/Opus、采用贡献下钻与按需计价 23 例。迁移后的首页游标用新键正常续页，旧游标不能请求迁移；新增历史不会改变此前冻结查询的关系。Hy3 离线费用 $1.25778 + 150 缺价 token 的原对账不变。
 - 前端偏好/迁移状态 **16 例通过**；另已复跑 Dashboard 与查询编排相关四文件 **134 例通过**。包含二次启动、新偏好空范围、旧响应晚到不覆盖用户新选择。一次构建发现合成夹具 `days=7` 的字面量类型过宽，已修正夹具类型，未改产品逻辑或阈值。
 - 类型检查及 build 通过；真实 Chromium 三项相关契约全部通过：`saved_model_drill_migration` **10**、Hy3 分组 **11**、Fable/Opus 日汇总下钻 **19** 条断言。首次打开截图已回看，Space Bunny 原始请求与有效模型筛选同屏；缺失/歧义回退和页面重启均未手工点击模型表格。
-- 红/绿与截图证据：`qa-artifacts/confirmed-model-stats/{model-preference-red,snapshot-validation-red,review-migration-green,review-core-regressions,review-browser}.log`、`review-browser/`（忽略入库）。最终完整钩子及最新 HEAD 的 PR 检查另作交付核对，不借用 `d25993e` 的通过结果。
+- 红/绿与截图证据：`qa-artifacts/confirmed-model-stats/{model-preference-red,snapshot-validation-red,review-migration-green,review-core-regressions,review-browser}.log`、`review-browser/`（忽略入库）。
+- **最终完整钩子与 PR 门禁**：
+  - 产品提交 `fa5e657` 的正常完整钩子通过：default workspace **1052 passed / 88 目标，0 failed**、acceptance **1071 passed / 88 目标，0 failed**；前端 **82 文件 / 1222 例**；浏览器 17 个具名契约全绿（含 `segmented_cold_start_highlight` 29、`saved_model_drill_migration` 10、`confirmed_model_stats_grouping` 11、`rollup_drilldown_rows` 19）；脚本契约 415 通过。
+  - 首次远端 `frontend` 在 `12f8579` 失败：`segmented_cold_start_highlight` 的方向键切换末帧采样停在 `183.2532px`（目标 `183px`，差 **0.2532px** > 0.25px），与本批统计无关。修复只让探针在 320ms 等待后**同步读取真实终态**；0.25px 阈值与中间帧要求未放宽。补修后在四项组合上该契约 29 条断言全通过，正常钩子整链通过，提交 `fa5e657`。
+  - PR [#78](https://github.com/ywltby/tokenscope/pull/78)（`fix/confirmed-model-stats-grouping` → `main`）最新 HEAD **`fa5e657f6511deee710a8051d536e8c9b3cb463c`** 的必需检查全绿：[CI](https://github.com/ywltby/tokenscope/actions/runs/45150878718) rust 6m30s / rust-acceptance 4m10s / contracts 8m28s / frontend 9m29s / **gate pass**；[Install test](https://github.com/ywltby/tokenscope/actions/runs/45150878653) install-test 10m24s、12 组单跳升级（含 0.9.6）全 pass、plan-upgrades pass；[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/45150878616) native-ui 11m30s。
+  - 本地 `bump_version.py --check --base-ref origin/main` = **0.9.7 / patch / base `f0fc12e` / release true**。
