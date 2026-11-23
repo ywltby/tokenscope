@@ -48,6 +48,7 @@
 - 聚合、图表、CCS 日行名称一致；下钻命中正确明细，费用/用量原值不变——新增 `formal_display_name_shared_by_aggregate_chart_and_rollup` 断言聚合与 CCS 日行同名、明细不写展示名、`reconcile` 守恒通过。
 - Rust：`cargo fmt --all --check` 干净；clippy 两种 feature 模式 `-D warnings` 通过；`run_rust_tests.py` 的 default 与 acceptance 两轮全部通过。
   - 本机链接内存限制：首次两轮测试并发链接报 `LNK1104`（与既有实施计划记录同类），按仓库已知处置将构建并发设为 2 后**串行重跑两轮全绿**，未降低任何测试数或阈值；失败轮次的临时根按约定保留现场。
+  - 正常提交钩子的 full 轮首次在 `latest_history_opens_without_writer_lock` 失败：硬阈值 1s、实测 1.0196s（超 19ms），该用例与本批改动无关（history.rs 未触碰）；单独连续重跑 3 次均 0.06–0.07s 通过，判定为完整钩子高负载下的偶发时序抖动。按仓库约定不降低阈值，原样重跑完整钩子。
 - 前端：`typecheck`、`format:check`、`test`（82 文件）、`build`、`test:e2e`（17 个具名浏览器契约全绿，含 `confirmed_model_stats_grouping` 与 `rollup_drilldown_rows`）全部通过。
   - 首次前端 `test` 与 Rust 全量并行时 2 个真实子进程用例因 forks worker 启动超时失败（测试架资源竞争，非断言/产品缺陷），单独串行重跑全绿；未修改超时或阈值。
 - 脚本契约：`python -B -m unittest discover -s scripts -p test_*.py` **415 项通过**。
