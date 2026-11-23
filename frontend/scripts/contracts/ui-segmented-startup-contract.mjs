@@ -18,8 +18,7 @@ function startFrameProbe() {
   window.__segmentIds = new WeakMap();
   let nextId = 0;
   const rect = (r) => ({ x: r.left, y: r.top, width: r.width, height: r.height });
-  const sample = () => {
-    if (!window.__segmentProbe) return;
+  const collect = () => {
     const groups = [...document.querySelectorAll(".ts-segmented")].flatMap((group) => {
       const box = group.getBoundingClientRect();
       const button = group.querySelector('.ts-segmented-item[aria-checked="true"]');
@@ -65,7 +64,17 @@ function startFrameProbe() {
         },
       ];
     });
+    return groups;
+  };
+  /** 在等待结束时同步读一次真实终态：rAF 最后一帧可能早于合成器落定不足 1px。 */
+  window.__segmentSampleNow = () => {
+    const groups = collect();
     if (groups.length) window.__segmentFrames.push({ at: performance.now(), groups });
+    return groups.length;
+  };
+  const sample = () => {
+    if (!window.__segmentProbe) return;
+    window.__segmentSampleNow();
     requestAnimationFrame(sample);
   };
   requestAnimationFrame(sample);
@@ -111,6 +120,10 @@ async function switchSample(ctx, session, locator, id, key, reduced, label) {
     await page.keyboard.press(key);
   } else await locator.click();
   await page.waitForTimeout(320);
+  // 0.2s 动画已结束：同步读一次真实终态，不把最后一次 rAF 采样（可能早于
+  // 合成器落定不足 1px）当作终态。动画若仍在进行，这次读取仍是中间位置并
+  // 照常失败——不放宽 0.25px，也不跳过中间帧断言。
+  await page.evaluate(() => window.__segmentSampleNow?.());
   const data = samples(await frames(page), id);
   const first = data[0];
   const last = data.at(-1);
