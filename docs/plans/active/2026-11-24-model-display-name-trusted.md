@@ -104,6 +104,12 @@
 - 提交 `14b8c0a` 经正常钩子（19 项全量检查）通过；PR #80 最新 HEAD 的必需检查：`gate`、`rust`、`rust-acceptance`、`contracts`、`frontend`、`install-test`、`native-ui`、`plan-upgrades` 均成功；`upgrade-test` 的 7 个基线（0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 / 0.6.0 / 0.9.7，各含 `deleted` 与 `present`）14 组全成功；`upgrade-chain` 按设计跳过。合计 21 项检查 20 成功 1 跳过，PR `mergeStateStatus=CLEAN`。
 - 顺带修掉一处工具链坑：Git Bash（MSYS）会把命令行参数里的 Windows 反斜杠路径转成混合斜杠，`SHCreateItemFromParsingName` 因此返回 `0x80070057`（E_INVALIDARG）。临时文件送回收站前必须经 `os.path.abspath()` 规范化，并复用 `scripts/run_rust_tests.py` 的 `_send_to_recycle_bin` / `_recycle_bin_holds` 复核 `$I` 条目。
 
+### 7.3 门禁重跑记录
+
+文档补记提交触发的 CI 首轮在 `frontend` 的既存契约 `model_chart_readable_rows` 失败，`gate` 随之失败：`5/light/1280x820` 期望 5 根柱、最小间距 ≥ 24px，实测 8 根柱、间距 6.8px，柱宽分成 0.01–0.05px 与 36px 两组——即 ECharts 从默认 fixture 切到 `model-rows-5` 的过渡帧（该用例固定等待 1000ms，恰等于默认动画时长，没有余量）。本批只改文档，且上一提交的同一契约一次通过，判定为既存用例在慢速 Runner 上的时序脆弱，不是本次改动引入。
+
+处置沿用「失败保留现场、不降阈值」：保留失败日志与浏览器证据工件，用 `gh run rerun --failed` 重跑；attempt 2 的 5 个作业（`gate` / `rust` / `rust-acceptance` / `contracts` / `frontend`）全部成功，PR 21 项检查 20 成功 + `upgrade-chain` 按设计跳过、`mergeStateStatus=CLEAN`。该用例的等待余量问题留作独立议题，不在本批扩大范围。
+
 ## 8. 后续
 
-- 已推送到 PR #80，最新 HEAD `14b8c0ad6cf7609ef1d79965ef62c1b9aed387e4` 的必需 CI 全绿。停在可审查状态：合并、发布与本机安装另行授权。
+- 已推送到 PR #80；最新 HEAD 的必需检查全部通过（20 项成功，`upgrade-chain` 按设计跳过），PR `mergeStateStatus=CLEAN`。停在可审查状态：合并、发布与本机安装另行授权。
