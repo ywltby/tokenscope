@@ -54,6 +54,26 @@
 - 脚本契约：`python -B -m unittest discover -s scripts -p test_*.py` **415 项通过**。
 - `build_inputs.py --check` 本机因脚本清理本地包后访问 registry 卡住（本机代理问题，非产物变更），已停止；本批只改 `.rs`/`.ts`/`.md`，未触及 `include_str!`/构建脚本输入，清单无需更新，CI 全量门禁会在有网环境复核。
 
-## 5. 后续
+## 5. 复核补修：官方优先与完整身份（同批 v0.9.8）
 
-- 经正常钩子提交、推送 PR，等最新 HEAD 必需 CI 全绿；停在可审查状态，合并/发布/本机安装另行授权。
+复核基线 `f7b75eed6f9a575ca4672e384cbdf561c3129029`。两个新反例先红后绿：
+
+| 反例 | 修复前实测 | 修复后实测 |
+| --- | --- | --- |
+| 302ai name=`Claude 4.7 Opus`、anthropic name=`Claude Opus 4.7` | 字典序选中 `Claude 4.7 Opus` | 确认基础模型 `anthropic/claudeopus47` → 官方正式名 `Claude Opus 4.7` |
+| `author-a/demo-1`=`Demo A One`、`author-b/demo-1`=`Demo B Two` | 查 B 返回 A 的名称 `Demo A One` | 带命名空间按自身身份得 `Demo B Two`；裸 `demo-1` 保留原始 ID（None） |
+
+- **实现**：`display_name_for` 改为分级——(1) 带命名空间用自身完整身份、裸 ID 用确认映射给出的官方完整 ID 精确匹配；(2) 官方缺名时用同版本渠道兜底，正式名核心形态互不包含判为冲突并保留原始 ID；(3) 名称质量分级（正式名 > ID 抄写）与同级稳定字典序保留。改动仅限 `pricing.rs` 展示名解析。
+- **边界补测**：新增排在官方前的转发渠道、目录乱序、官方缺名兜底、裸 ID / 带命名空间 / 无目录；`model_display_name_prefers_formal_name_over_id_copy` 用本机目录形状（302ai ID 抄写 + 官方正式名）确认 Opus 4.7 / Sonnet 4.6 / GPT-5.4 三模型继续显示正式名。`confirmed_model_stats` 的精确逐请求断言确认聚合表、CCS 日行同名与下钻原始 ID。
+- **精确逐请求断言**：`formal_display_name_shared_by_aggregate_chart_and_rollup` 改为分别断言——原生 Opus 行 `model == "claude-opus-4-7"`；CCS 日行 `label == "Claude Opus 4.7"` 且 `meta.models == [claude-opus-4-7]`（日行 model 允许统计分组键）。
+- **测试期望变更**：`model_display_name_is_order_independent` 原断言裸 `opus55` 在 acme/beta 各有正式名时按字典序选 `Acme Name`；按新语义（无法确认的同末段冲突保留原始 ID）改为期望 `None`，并新增带命名空间的 `acme/opus55`→`Acme Name`、`beta/opus55`→`Beta Name` 断言；顺序无关性不变量保留。
+- **未改**：版本仍 0.9.8、快照仍 v24，未重复递增；`Group.key`、下钻、CCS 覆盖与逐条计价口径未动。
+
+## 6. 复核补修验收（2026-11-24）
+
+- Rust 定向：`model_identity_contract` 20 项全绿（新增官方优先、命名空间身份、边界三例）；`confirmed_model_stats` 11 项全绿（精确逐请求断言）；`model_alias_rollup_drilldown`（12）、`model_alias_rollup_review`（7）无回归。
+- `confirmed_model_stats` 的 `query_expired` 抖动定位为测试架会话槽竞争：产品 `MAX_ACTIVE_QUERIES=8`，该文件多个用例并行各建查询会话，我最初新增的第三个建会话用例使并行会话数越过临界，稳定淘汰既有的 `legacy_model_migration...` 用例所持有的 `empty` 会话。处置：删除该冗余用例（其验证目标已由 `model_identity_contract` 的本机形状测试与 `confirmed_model_stats` 精确断言完整覆盖），恢复后连续 5 轮全绿。未改产品代码、未降任何阈值、未跳过断言。
+
+## 7. 后续
+
+- 经正常钩子提交、推送 PR #80，等最新 HEAD 必需 CI 全绿；停在可审查状态，合并/发布/本机安装另行授权。

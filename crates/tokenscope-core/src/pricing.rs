@@ -107,6 +107,48 @@ fn display_name_quality(e: &Entry) -> u8 {
     }
 }
 
+/// 正式名的核心形态：删除空白与非字母数字字符并转小写，用于容忍同一模型的
+/// 地区/格式变体（`Claude Sonnet 4.6 (AU)`、`GPT 5.4` 与 `GPT-5.4`）。
+fn display_name_core(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// 同末段的正式名是否指向同一模型版本。以最短核心形态为基准，其余核心形态
+/// 须包含它；`Demo A One` / `Demo B Two` 互不包容 → 判为借错名的冲突。
+fn formal_names_same_model(names: &[String]) -> bool {
+    let mut cores: Vec<String> = names.iter().map(|n| display_name_core(n)).collect();
+    cores.retain(|c| !c.is_empty());
+    if cores.len() <= 1 {
+        return true;
+    }
+    let Some(base) = cores.iter().min_by_key(|c| c.len()) else {
+        return true;
+    };
+    cores.iter().all(|c| c.contains(base.as_str()))
+}
+
+/// 在候选中按「名称质量优先、同级稳定字典序」择一。
+fn pick_display_name_entry<'a>(candidates: &[&'a Entry]) -> Option<&'a Entry> {
+    let mut best: Option<&Entry> = None;
+    for &e in candidates {
+        let better = match best {
+            None => true,
+            Some(b) => match display_name_quality(e).cmp(&display_name_quality(b)) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Equal => entry_display_order(e, b),
+                std::cmp::Ordering::Less => false,
+            },
+        };
+        if better {
+            best = Some(e);
+        }
+    }
+    best
+}
+
 /// 归一后基名为空（`provider/-._`、`-._`）→ 不是有效价格键：拒绝入库并由调用方
 /// 给出诊断（查询端同样拒绝空键，这里从源头保证空键不进入价格表）。
 fn empty_model_key(display: &str) -> bool {
@@ -3182,34 +3224,58 @@ impl Pricing {
     /// 即使 name 相同也不合并（身份由 `model_identity` 决定）。未命中返回
     /// None——聚合层退回该组原始模型名的稳定代表写法。
     pub fn display_name_for(&self, model: &str) -> Option<String> {
-        let id = crate::model_identity::ModelIdentity::parse(model);
+        use crate::model_identity::ModelIdentity;
+        let id = ModelIdentity::parse(model);
         if id.is_empty_key() {
             return None;
         }
         let group = self.by_prefix.get(id.leaf_key().as_bytes())?;
-        let mut best: Option<&Entry> = None;
-        for e in group {
-            if e.tier != TIER_MODELSDEV {
-                continue;
-            }
-            let Some(cur) = best else {
-                if display_name_quality(e) > 0 {
-                    best = Some(e);
-                }
-                continue;
-            };
-            // 先比名称质量（正式名 > ID 抄写），同级再用稳定字典序打破并列。
-            // 目录乱序或新增代理渠道时，同一质量级的结果仍确定。
-            let better = match display_name_quality(e).cmp(&display_name_quality(cur)) {
-                std::cmp::Ordering::Greater => true,
-                std::cmp::Ordering::Equal => entry_display_order(e, cur),
-                std::cmp::Ordering::Less => false,
-            };
-            if better {
-                best = Some(e);
+        let candidates: Vec<&Entry> = group
+            .iter()
+            .filter(|e| e.tier == TIER_MODELSDEV && display_name_quality(e) > 0)
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+
+        // 目标身份：带命名空间的查询优先用自身完整身份；裸 ID 只有在
+        // 确认映射（固定别名或可信目录关系）能给出完整身份时才采用。
+        let structural = id.identity_key();
+        let confirmed = self.model_stats.key_for(model);
+        let target = if id.namespace().is_some() {
+            structural.clone()
+        } else if confirmed != structural && ModelIdentity::parse(&confirmed).namespace().is_some()
+        {
+            confirmed.clone()
+        } else {
+            String::new()
+        };
+
+        // 第一优先：完整身份精确命中的条目。带命名空间时只用自身身份那一条，
+        // 不跨命名空间借用；能确认基础模型时优先它对应的官方完整 ID。
+        if !target.is_empty() {
+            let exact: Vec<&Entry> = candidates
+                .iter()
+                .copied()
+                .filter(|e| ModelIdentity::parse(&e.display).identity_key() == target)
+                .collect();
+            if let Some(name) = pick_display_name_entry(&exact).and_then(|e| e.name.clone()) {
+                return Some(name);
             }
         }
-        best.and_then(|e| e.name.clone())
+
+        // 兜底：从明确属于同一模型版本的同末段渠道里选正式名。
+        // 若这些渠道给出互不兼容的名称（如 author-a/demo-1 与 author-b/demo-1），
+        // 说明身份无法确认，保留原始 ID（返回 None）；ID 抄写仍降为最后兜底。
+        let formal: Vec<String> = candidates
+            .iter()
+            .filter(|e| display_name_quality(e) == 2)
+            .filter_map(|e| e.name.clone())
+            .collect();
+        if !formal.is_empty() && !formal_names_same_model(&formal) {
+            return None;
+        }
+        pick_display_name_entry(&candidates).and_then(|e| e.name.clone())
     }
 
     /// 模型统计分组键：聚合、图表数据、模型下钻、CCS 日行展示与下钻指纹共用。

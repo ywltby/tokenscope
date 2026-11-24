@@ -231,24 +231,22 @@ fn formal_display_name_shared_by_aggregate_chart_and_rollup() {
         },
     )
     .unwrap();
-    assert!(drill.total >= 1, "下钻需返回原生请求或 CCS 日行");
-    let mut saw_native = false;
-    let mut saw_rollup = false;
-    for row in &drill.rows {
-        assert_ne!(
-            row.model, "Claude Opus 4.7",
-            "请求明细保留 ID（原始或已确认规范写法），不写入展示名"
-        );
-        if let Some(meta) = row.rollup.as_ref() {
-            saw_rollup = true;
-            assert_eq!(meta.label, "Claude Opus 4.7", "CCS 日汇总与聚合表名称一致");
-            assert_eq!(meta.models, [OPUS], "CCS 原始 ID 详情可查");
-        } else {
-            saw_native = true;
-        }
-    }
-    assert!(saw_native, "需含原生请求明细");
-    assert!(saw_rollup, "需含 CCS 日汇总行");
+    // 逐请求断言改为精确语义：原生行保留原始 ID；CCS 日行单独断言展示名与原始 ID。
+    let native_rows: Vec<_> = drill.rows.iter().filter(|r| r.rollup.is_none()).collect();
+    let rollup_rows: Vec<_> = drill.rows.iter().filter(|r| r.rollup.is_some()).collect();
+    assert_eq!(native_rows.len(), 1, "需含一条原生请求明细");
+    assert_eq!(rollup_rows.len(), 1, "需含一条 CCS 日汇总行");
+    assert_eq!(
+        native_rows[0].model, OPUS,
+        "原生 Opus 请求明细必须是原始 ID，不写展示名也不写统计分组键"
+    );
+    let meta = rollup_rows[0].rollup.as_ref().unwrap();
+    // 日行的 model 允许是统计分组键，但展示名与原始 ID 详情必须精确。
+    assert_eq!(
+        meta.label, "Claude Opus 4.7",
+        "CCS 日汇总展示名与聚合表一致"
+    );
+    assert_eq!(meta.models, [OPUS], "CCS 日行保留原始模型 ID 详情");
     reconcile(group, &drill.rows);
 }
 

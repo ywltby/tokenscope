@@ -262,6 +262,135 @@ fn model_display_name_prefers_formal_name_over_id_copy() {
     assert_eq!(p2.display_name_for("gpt-5.4").as_deref(), Some("GPT-5.4"));
 }
 
+/// v0.9.8 补修（DN04）：同为正式名时，302ai 的「Claude 4.7 Opus」字典序靠前，
+/// 旧逻辑选中它；应先按确认的基础模型官方完整 ID 选「Claude Opus 4.7」。
+#[test]
+fn model_display_name_prefers_official_full_id_over_channel_rename() {
+    let dir = tmp("official-over-channel-rename");
+    let snap = sync_to(
+        &dir,
+        "md.json",
+        r#"{
+            "302ai": {"models": {
+                "claude-opus-4-7": {"name": "Claude 4.7 Opus", "cost": {"input": 3, "output": 15}}
+            }},
+            "anthropic": {"models": {
+                "claude-opus-4-7": {"name": "Claude Opus 4.7", "cost": {"input": 3, "output": 15}}
+            }}
+        }"#,
+    );
+    let (p, _w) = Pricing::load(None, Some(&snap), None);
+    // 裸 ID 与确认后的基础键都必须落到官方条目的正式名。
+    assert_eq!(
+        p.display_name_for("claude-opus-4-7").as_deref(),
+        Some("Claude Opus 4.7"),
+        "确认到基础模型后优先官方完整 ID 的正式名"
+    );
+    assert_eq!(
+        p.display_name_for("anthropic/claude-opus-4-7").as_deref(),
+        Some("Claude Opus 4.7"),
+        "带命名空间时按自身完整身份解析"
+    );
+    assert_eq!(
+        p.display_name_for(p.model_stats_key("claude-opus-4-7").as_str())
+            .as_deref(),
+        Some("Claude Opus 4.7")
+    );
+}
+
+/// v0.9.8 补修（DN06）：新增排在官方前的转发渠道、目录乱序、官方条目缺名时
+/// 的兜底与裸 ID / 确认别名 / 无目录的结果。
+#[test]
+fn model_display_name_official_priority_edge_cases() {
+    // 302ai（正式名）与 aaa-relay（字典序更靠前）都排在官方 anthropic 前。
+    let dir = tmp("official-edges");
+    let snap = sync_to(
+        &dir,
+        "md.json",
+        r#"{
+            "aaa-relay": {"models": {
+                "claude-opus-4-7": {"name": "Relay Opus 4.7", "cost": {"input": 3, "output": 15}}
+            }},
+            "302ai": {"models": {
+                "claude-opus-4-7": {"name": "Claude 4.7 Opus", "cost": {"input": 3, "output": 15}}
+            }},
+            "anthropic": {"models": {
+                "claude-opus-4-7": {"name": "Claude Opus 4.7", "cost": {"input": 3, "output": 15}}
+            }}
+        }"#,
+    );
+    let (p, _) = Pricing::load(None, Some(&snap), None);
+    assert_eq!(
+        p.display_name_for("claude-opus-4-7").as_deref(),
+        Some("Claude Opus 4.7"),
+        "转发渠道乱序与字典序靠前都不改变官方优先结果"
+    );
+    assert_eq!(
+        p.display_name_for("anthropic/claude-opus-4-7").as_deref(),
+        Some("Claude Opus 4.7")
+    );
+
+    // 官方条目缺名 → 用已确认渠道（同末段正式名）兜底。
+    let dir2 = tmp("official-missing-name");
+    let snap2 = sync_to(
+        &dir2,
+        "md.json",
+        r#"{
+            "302ai": {"models": {
+                "claude-opus-4-7": {"name": "Claude 4.7 Opus", "cost": {"input": 3, "output": 15}}
+            }},
+            "anthropic": {"models": {
+                "claude-opus-4-7": {"cost": {"input": 3, "output": 15}}
+            }}
+        }"#,
+    );
+    let (p2, _) = Pricing::load(None, Some(&snap2), None);
+    assert_eq!(
+        p2.display_name_for("claude-opus-4-7").as_deref(),
+        Some("Claude 4.7 Opus"),
+        "官方条目无可用正式名时用已确认渠道的正式名兜底"
+    );
+
+    // 无目录 → 裸 ID、确认别名都返回 None（保留原始 ID）。
+    let (p3, _) = Pricing::load(None, None, None);
+    assert_eq!(p3.display_name_for("claude-opus-4-7"), None);
+    assert_eq!(p3.display_name_for("gpt-6-astra-cc-format"), None);
+}
+
+/// v0.9.8 补修（DN05）：同末段不同命名空间各有正式名，查 B 不得借 A 的名称；
+/// 裸 ID 因无法确认身份且正式名冲突，保留原始 ID（返回 None）。
+#[test]
+fn model_display_name_uses_own_namespace_and_keeps_ambiguous_bare_id() {
+    let dir = tmp("namespace-identity");
+    let snap = sync_to(
+        &dir,
+        "md.json",
+        r#"{
+            "author-a": {"models": {
+                "demo-1": {"name": "Demo A One", "cost": {"input": 3, "output": 15}}
+            }},
+            "author-b": {"models": {
+                "demo-1": {"name": "Demo B Two", "cost": {"input": 3, "output": 15}}
+            }}
+        }"#,
+    );
+    let (p, _w) = Pricing::load(None, Some(&snap), None);
+    assert_eq!(
+        p.display_name_for("author-b/demo-1").as_deref(),
+        Some("Demo B Two"),
+        "带命名空间应使用自身完整身份，不借 author-a 的名称"
+    );
+    assert_eq!(
+        p.display_name_for("author-a/demo-1").as_deref(),
+        Some("Demo A One")
+    );
+    assert_eq!(
+        p.display_name_for("demo-1"),
+        None,
+        "裸 ID 的同末段正式名冲突且无可确认身份时保留原始 ID"
+    );
+}
+
 /// DN02：没有正式名时，ID 抄写式 name 仍是合法兜底（如 `o3` 的目录名就是 `o3`）。
 #[test]
 fn model_display_name_id_copy_is_last_resort() {
@@ -658,10 +787,21 @@ fn model_display_name_is_order_independent() {
         p2.display_name_for("opus55"),
         "同一等价 ID 下的展示名必须与条目顺序无关"
     );
+    // v0.9.8 补修：acme / beta 是两个不同命名空间且各有正式名，裸 opus55
+    // 无法确认基础身份 → 保留原始 ID，不再按字典序借用其中一方的名称。
     assert_eq!(
         p1.display_name_for("opus55").as_deref(),
-        Some("Acme Name"),
-        "按 (display, name) 稳定序择一"
+        None,
+        "无法确认的同末段冲突保留原始 ID"
+    );
+    // 带命名空间的查询仍按自身完整身份解析到各自正式名。
+    assert_eq!(
+        p1.display_name_for("acme/opus55").as_deref(),
+        Some("Acme Name")
+    );
+    assert_eq!(
+        p1.display_name_for("beta/opus55").as_deref(),
+        Some("Beta Name")
     );
 }
 
