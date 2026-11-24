@@ -74,6 +74,28 @@
 - Rust 定向：`model_identity_contract` 20 项全绿（新增官方优先、命名空间身份、边界三例）；`confirmed_model_stats` 11 项全绿（精确逐请求断言）；`model_alias_rollup_drilldown`（12）、`model_alias_rollup_review`（7）无回归。
 - `confirmed_model_stats` 的 `query_expired` 抖动定位为测试架会话槽竞争：产品 `MAX_ACTIVE_QUERIES=8`，该文件多个用例并行各建查询会话，我最初新增的第三个建会话用例使并行会话数越过临界，稳定淘汰既有的 `legacy_model_migration...` 用例所持有的 `empty` 会话。处置：删除该冗余用例（其验证目标已由 `model_identity_contract` 的本机形状测试与 `confirmed_model_stats` 精确断言完整覆盖），恢复后连续 5 轮全绿。未改产品代码、未降任何阈值、未跳过断言。
 
-## 7. 后续
+## 7. 二次复核补修：先定身份、再比名称（同批 v0.9.8 / v24）
+
+复核基线 `27f453a857cba4dfa94e8f0ce1876fbffd3403ac`。三个缺口先红后绿：
+
+| 反例 | 修复前实测 | 修复后实测 |
+| --- | --- | --- |
+| Sonnet：302ai ID 抄写 + aimlapi 词序变体 `Claude 4.6 Sonnet` + Anthropic `Claude Sonnet 4.6` | `None`（名称核心互不包含被误判冲突，显示原始 ID） | `Claude Sonnet 4.6` |
+| author-a `Demo 1`、author-b `Demo 1 Pro`、author-c 无名称 | `author-c/demo-1` → `Demo 1`（借 A）；裸 `demo-1` → `Demo 1` | 两者均 `None`（保留原始 ID）；author-a/b 仍各自解析 |
+| Anthropic 官方 name 为 `claude-opus-4-7`、abacus 为 `Claude Opus 4.7` | `claude-opus-4-7`（直接返回官方 ID 抄写） | `Claude Opus 4.7`（回落已确认渠道正式名） |
+
+- **根因**：上一版用名称核心形态的包含关系推断「是否同一模型」，`Claude 4.6 Sonnet` 与 `Claude Sonnet 4.6`、`Demo 1` 与 `Demo 1 Pro` 的包含关系被误用为身份证据；且带命名空间自身无合格名时错误落入同末段兜底；官方 quality 1 命中后未继续找渠道正式名。
+- **实现**：`display_name_for` 改为「先定身份、再比质量」——(1) 身份由命名层已核实映射、统计层固定别名/目录 `base_model` 关系、自身完整 ID 或裸 ID 的唯一 models.dev 身份决定，名称不参与；(2) 已确认基础模型时同末段渠道同池取词，仅自身身份时只含自身条目；(3) 官方正式名 → 渠道正式名 → ID 抄写兜底，同级稳定序。
+- **命名层映射**：新增 `DISPLAY_NAME_ALIASES`（`claudesonnet46` → `anthropic/claudesonnet46`、`gpt54` → `openai/gpt54`），仅用于展示名候选集合，不进入 `model_stats_key` / `canonical_identity_key` / 计价 / 下钻 / CCS 覆盖，`Group.key` 与历史库不变。两条均按本机 v4 目录逐条核对官方模型级名称。
+- **删除**：`display_name_core` 与 `formal_names_same_model`（用名称包含判身份的错误做法）。
+- **边界补测**：目录乱序（Sonnet 正/反序）、缺官方名称（沿用既有用例）、同末段异模（author-a/b/c）、Preview 与日期版本（各按自身完整 ID 解析，日期版本无目录条目保留原文）。
+
+### 7.1 验收
+
+- Rust 定向：`model_identity_contract` 24 项全绿（新增词序变体、无名称命名空间、官方 ID 抄写回落、Preview/日期四例）；`confirmed_model_stats` 11、`model_alias_rollup_drilldown` 12、`model_alias_rollup_review` 7 无回归。
+- **本机目录只读复核**（一次性临时测试，跑后送回收站，未写任何用户数据）：`claude-opus-4-7` → `Claude Opus 4.7`、`claude-sonnet-4-6` → `Claude Sonnet 4.6`、`gpt-5.4` → `GPT-5.4`，裸 ID 与官方完整 ID 结果一致。
+- 未改：版本仍 0.9.8、快照仍 v24；`Group.key`、下钻匹配、CCS 覆盖、请求数、四桶与逐条计价口径未动。
+
+## 8. 后续
 
 - 经正常钩子提交、推送 PR #80，等最新 HEAD 必需 CI 全绿；停在可审查状态，合并/发布/本机安装另行授权。

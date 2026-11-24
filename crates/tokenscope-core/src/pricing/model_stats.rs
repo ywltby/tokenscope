@@ -82,6 +82,17 @@ impl ModelStatsGrouping {
             .map_or(key, str::to_owned)
     }
 
+    /// 展示名专用（v0.9.8 补修二）：只返回**确有确认依据**的基础完整 ID——
+    /// 固定别名（含基础键自身）或目录显式 `base_model` 关系；没有依据时返回
+    /// None，不回退输入本身。调用方据此区分「已确认基础模型」与「仅自身结构
+    /// 身份」，避免把同末段的其它命名空间误当同一模型。
+    pub(super) fn confirmed_base_for(&self, model: &str) -> Option<String> {
+        let key = super::normalize_model_id(model);
+        confirmed_key(&key)
+            .or_else(|| self.aliases.get(&key).map(String::as_str))
+            .map(str::to_owned)
+    }
+
     pub(super) fn retained_bytes(&self) -> Result<usize, String> {
         let mut n = ByteCount::default();
         n.add(capacity_bytes(

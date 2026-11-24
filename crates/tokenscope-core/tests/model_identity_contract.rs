@@ -262,6 +262,165 @@ fn model_display_name_prefers_formal_name_over_id_copy() {
     assert_eq!(p2.display_name_for("gpt-5.4").as_deref(), Some("GPT-5.4"));
 }
 
+/// v0.9.8 补修二（DN10）：Preview 与日期版本是独立模型版本，不得借用基础版
+/// 的展示名；目录无该完整 ID 条目时保留原始 ID。
+#[test]
+fn model_display_name_preview_and_date_versions_do_not_borrow_base() {
+    let dir = tmp("preview-date");
+    let snap = sync_to(
+        &dir,
+        "md.json",
+        r#"{
+            "anthropic": {"models": {
+                "claude-sonnet-4-6": {"name": "Claude Sonnet 4.6", "cost": {"input": 3, "output": 15}},
+                "claude-sonnet-4-6-preview": {"name": "Claude Sonnet 4.6 Preview", "cost": {"input": 3, "output": 15}}
+            }}
+        }"#,
+    );
+    let (p, _w) = Pricing::load(None, Some(&snap), None);
+    assert_eq!(
+        p.display_name_for("claude-sonnet-4-6-preview").as_deref(),
+        Some("Claude Sonnet 4.6 Preview"),
+        "Preview 使用自身名称，不借基础版"
+    );
+    assert_eq!(
+        p.display_name_for("claude-sonnet-4-6-20260101"),
+        None,
+        "日期版本无目录条目时保留原始 ID"
+    );
+    assert_eq!(
+        p.display_name_for("claude-sonnet-4-6").as_deref(),
+        Some("Claude Sonnet 4.6"),
+        "基础版仍是正式名"
+    );
+}
+
+/// v0.9.8 补修二（DN07）：aimlapi 把同一模型写成词序变体「Claude 4.6 Sonnet」。
+/// 旧规则用名称核心形态的包含关系判身份，与官方「Claude Sonnet 4.6」互不包含
+/// 而误判冲突；身份应由完整 ID / 已确认基础模型决定，名称只参与质量排序。
+#[test]
+fn model_display_name_word_order_variant_is_not_conflict() {
+    let dir = tmp("sonnet-word-order");
+    let snap = sync_to(
+        &dir,
+        "md.json",
+        r#"{
+            "302ai": {"models": {
+                "claude-sonnet-4-6": {"name": "claude-sonnet-4-6", "cost": {"input": 3, "output": 15}}
+            }},
+            "aimlapi": {"models": {
+                "claude-sonnet-4-6": {"name": "Claude 4.6 Sonnet", "cost": {"input": 3, "output": 15}}
+            }},
+            "anthropic": {"models": {
+                "claude-sonnet-4-6": {"name": "Claude Sonnet 4.6", "cost": {"input": 3, "output": 15}}
+            }}
+        }"#,
+    );
+    let (p, _w) = Pricing::load(None, Some(&snap), None);
+    assert_eq!(
+        p.display_name_for("claude-sonnet-4-6").as_deref(),
+        Some("Claude Sonnet 4.6"),
+        "词序变体不是身份冲突，官方正式名优先"
+    );
+    assert_eq!(
+        p.display_name_for("anthropic/claude-sonnet-4-6").as_deref(),
+        Some("Claude Sonnet 4.6")
+    );
+    // 目录乱序不影响结果。
+    let dir2 = tmp("sonnet-word-order-reversed");
+    let snap2 = sync_to(
+        &dir2,
+        "md.json",
+        r#"{
+            "anthropic": {"models": {
+                "claude-sonnet-4-6": {"name": "Claude Sonnet 4.6", "cost": {"input": 3, "output": 15}}
+            }},
+            "aimlapi": {"models": {
+                "claude-sonnet-4-6": {"name": "Claude 4.6 Sonnet", "cost": {"input": 3, "output": 15}}
+            }},
+            "302ai": {"models": {
+                "claude-sonnet-4-6": {"name": "claude-sonnet-4-6", "cost": {"input": 3, "output": 15}}
+            }}
+        }"#,
+    );
+    let (p2, _w2) = Pricing::load(None, Some(&snap2), None);
+    assert_eq!(
+        p2.display_name_for("claude-sonnet-4-6").as_deref(),
+        Some("Claude Sonnet 4.6")
+    );
+}
+
+/// v0.9.8 补修二（DN08）：同末段但不同命名空间是不同模型；author-c 没有
+/// 名称时不得借用 author-a 的名称，裸 demo-1 也无法确认身份。
+#[test]
+fn model_display_name_unnamed_namespace_does_not_borrow_sibling() {
+    let dir = tmp("unnamed-namespace");
+    let snap = sync_to(
+        &dir,
+        "md.json",
+        r#"{
+            "author-a": {"models": {
+                "demo-1": {"name": "Demo 1", "cost": {"input": 3, "output": 15}}
+            }},
+            "author-b": {"models": {
+                "demo-1": {"name": "Demo 1 Pro", "cost": {"input": 3, "output": 15}}
+            }},
+            "author-c": {"models": {
+                "demo-1": {"cost": {"input": 3, "output": 15}}
+            }}
+        }"#,
+    );
+    let (p, _w) = Pricing::load(None, Some(&snap), None);
+    assert_eq!(
+        p.display_name_for("author-c/demo-1"),
+        None,
+        "带命名空间且自身无合格名称时保留自身原始 ID，不借同末段渠道"
+    );
+    assert_eq!(
+        p.display_name_for("demo-1"),
+        None,
+        "裸 ID 无确认身份且同末段多身份冲突，保留原文"
+    );
+    // 有名称的同末段仍按自身身份解析。
+    assert_eq!(
+        p.display_name_for("author-a/demo-1").as_deref(),
+        Some("Demo 1")
+    );
+    assert_eq!(
+        p.display_name_for("author-b/demo-1").as_deref(),
+        Some("Demo 1 Pro")
+    );
+}
+
+/// v0.9.8 补修二（DN09）：官方条目 name 只是 ID 抄写时，应继续在同一模型
+/// 版本的已确认渠道里找正式名，而不是直接返回 ID。
+#[test]
+fn model_display_name_id_copy_official_falls_back_to_channel_name() {
+    let dir = tmp("official-id-copy");
+    let snap = sync_to(
+        &dir,
+        "md.json",
+        r#"{
+            "anthropic": {"models": {
+                "claude-opus-4-7": {"name": "claude-opus-4-7", "cost": {"input": 3, "output": 15}}
+            }},
+            "abacus": {"models": {
+                "claude-opus-4-7": {"name": "Claude Opus 4.7", "cost": {"input": 3, "output": 15}}
+            }}
+        }"#,
+    );
+    let (p, _w) = Pricing::load(None, Some(&snap), None);
+    assert_eq!(
+        p.display_name_for("anthropic/claude-opus-4-7").as_deref(),
+        Some("Claude Opus 4.7"),
+        "官方只有 ID 抄写时回落已确认渠道的正式名"
+    );
+    assert_eq!(
+        p.display_name_for("claude-opus-4-7").as_deref(),
+        Some("Claude Opus 4.7")
+    );
+}
+
 /// v0.9.8 补修（DN04）：同为正式名时，302ai 的「Claude 4.7 Opus」字典序靠前，
 /// 旧逻辑选中它；应先按确认的基础模型官方完整 ID 选「Claude Opus 4.7」。
 #[test]
