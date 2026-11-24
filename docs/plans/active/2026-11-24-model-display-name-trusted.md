@@ -141,4 +141,5 @@
 - 正常提交钩子（selected 模式 6 条命令：`cargo fmt --check`、默认 clippy/test、acceptance clippy/test、暂存文档检查）全部通过，提交 `14c92a8`。
 - 首轮 acceptance 轮在链接阶段报 `LNK1104`（`rollup_applicability_round8/10` 的 `.exe` 无法打开），与本批代码无关；按计划 §4 已记录的仓库处置设 `CARGO_BUILD_JOBS=2` 后重跑钩子，两轮全绿——未跳过、未降低任何检查。
 - acceptance 轮覆盖 `model_identity_contract` 25 项、`confirmed_model_stats` 11 项、`model_alias_rollup_drilldown` 12 项、`model_alias_rollup_review` 7 项，均通过；本批未改前端，视图快照仍 v24，`test:e2e` 由 PR CI 全量复核。
+- PR #80 在 `dd22f6f`（产品提交 `14c92a8` + 本计划补记）上的必需检查：`gate`、`rust`、`rust-acceptance`、`contracts`、`frontend`、`install-test`、`native-ui`、`plan-upgrades` 全部成功；`upgrade-test` 的 7 个基线（0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 / 0.6.0 / 0.9.7，各含 `deleted` 与 `present`）14 组全成功，`upgrade-chain` 按设计跳过。合计 21 项检查 20 成功 1 跳过，PR `mergeStateStatus=CLEAN`。此后的文档补记不改变产品输入。
 
