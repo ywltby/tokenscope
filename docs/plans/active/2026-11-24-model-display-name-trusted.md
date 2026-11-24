@@ -96,6 +96,14 @@
 - **本机目录只读复核**（一次性临时测试，跑后送回收站，未写任何用户数据）：`claude-opus-4-7` → `Claude Opus 4.7`、`claude-sonnet-4-6` → `Claude Sonnet 4.6`、`gpt-5.4` → `GPT-5.4`，裸 ID 与官方完整 ID 结果一致。
 - 未改：版本仍 0.9.8、快照仍 v24；`Group.key`、下钻匹配、CCS 覆盖、请求数、四桶与逐条计价口径未动。
 
+### 7.2 全量与门禁
+
+- Rust：`cargo fmt --all --check` 与 `git diff --check` 干净；clippy 在 default 与 `--features acceptance` 下均 0 warning；`test default` 88 个测试目标全绿（0 失败），`test acceptance` 88 个目标、1082 个用例全绿（0 失败）。全程无 `LNK1104`、无 `query_expired`、无 panic。本机为 7 CU APU，acceptance 需重新链接全部测试二进制，整轮约 2 小时（`CARGO_BUILD_JOBS=2` 串行）。
+- 前端：`typecheck`、`format:check`、`build` 通过；`test` 1221/1222。唯一 1 例 `Settings.test.ts > initial_value_comes_from_settings_get` 在 5s 预算处超时——当时与 rustc 全量编译并行（82 个 worker 各约 1.9s 启动），该文件单独重跑用例耗时 3088ms 并 61 例全绿，判定为资源竞争下的时序抖动；未改超时阈值、未跳过断言。
+- 浏览器契约：`test:e2e` 的 17 个具名契约、1193 条断言全部通过，含本批直接相关的 `confirmed_model_stats_grouping`（11 条）与 `model_chart_readable_rows`（121 条）。
+- 提交 `14b8c0a` 经正常钩子（19 项全量检查）通过；PR #80 最新 HEAD 的必需检查：`gate`、`rust`、`rust-acceptance`、`contracts`、`frontend`、`install-test`、`native-ui`、`plan-upgrades` 均成功；`upgrade-test` 的 7 个基线（0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 / 0.6.0 / 0.9.7，各含 `deleted` 与 `present`）14 组全成功；`upgrade-chain` 按设计跳过。合计 21 项检查 20 成功 1 跳过，PR `mergeStateStatus=CLEAN`。
+- 顺带修掉一处工具链坑：Git Bash（MSYS）会把命令行参数里的 Windows 反斜杠路径转成混合斜杠，`SHCreateItemFromParsingName` 因此返回 `0x80070057`（E_INVALIDARG）。临时文件送回收站前必须经 `os.path.abspath()` 规范化，并复用 `scripts/run_rust_tests.py` 的 `_send_to_recycle_bin` / `_recycle_bin_holds` 复核 `$I` 条目。
+
 ## 8. 后续
 
-- 经正常钩子提交、推送 PR #80，等最新 HEAD 必需 CI 全绿；停在可审查状态，合并/发布/本机安装另行授权。
+- 已推送到 PR #80，最新 HEAD `14b8c0ad6cf7609ef1d79965ef62c1b9aed387e4` 的必需 CI 全绿。停在可审查状态：合并、发布与本机安装另行授权。
