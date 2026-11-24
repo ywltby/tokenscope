@@ -1,9 +1,11 @@
 # TokenScope 计划与完成状态总账
 
-> 更新日期：2026-11-23。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
+> 更新日期：2026-11-24。**用户明确要求 > 较新计划 > 较旧计划 > 未确认的设计建议。**
 > 唯一当前待办入口：[剩余任务整合与验收计划](active/2026-10-11-consolidated-remaining-work.md)。真实跨午夜、长时间休眠、跨显示器在[独立系统验收待办](system-acceptance-todo.md)维护，均未排期、未标通过。[审计索引](audits/README.md)保留历史时点结论。
 
 ## 现在执行什么
+
+**2026-11-24 v0.9.8 已发布：模型展示名候选逐条核对身份**：[实施计划](active/2026-11-24-model-display-name-trusted.md)。同末段只作检索键；渠道须以自身完整 ID 或目录 `canonical_model_id` 明确证明属于同一基础模型才能参与选名。官方 name 只是原始 ID 时回落到已确认渠道的 `Claude Opus 4.7`，指向其它模型的同末段条目保留自己的名称（`Independent Model`），整组没有合格名称时界面保留原始 ID。PR #80 以 `--match-head-commit` 绑定复核 HEAD `fe91311` 合并为 `fe07171`；[Release 45351451294](https://github.com/ywltby/tokenscope/actions/runs/45351451294) 19 作业全成功无跳过（gate、plan-upgrades、构建、安装测试、6 个基线的 12 组单跳、present/deleted 两条连续升级链、publish），[同提交 main CI](https://github.com/ywltby/tokenscope/actions/runs/45351451323) 与 [Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/45351451299) 全绿。[v0.9.8](https://github.com/ywltby/tokenscope/releases/tag/v0.9.8) 预发布已公开，标签解引用与 `build-metadata.json` 均指向 `fe07171`，安装包 SHA256 `079054ad…8eeb49` 下载后与 `SHA256SUMS.txt` 及 GitHub 资产 digest 三方一致，四项资产齐全；v0.9.8 已登记升级基线（`select --current-version 0.9.9` 起点含 0.9.8）。安装与升级验证在 GitHub Runner 隔离环境完成，本机未安装、未触碰真实数据。
 
 **2026-11-23 v0.9.7 已发布：已确认的模型渠道与计费档合并展示、旧模型下钻偏好自动迁移、拒绝损坏价格快照的别名**：[实施计划](active/2026-11-20-confirmed-model-stats-grouping.md)。WorkBuddy `hy3` 与 CCS `tencent/hy3:free` 合并为一行一柱 Hy3（请求明细保留原始 ID、仍逐条计价），旧 Space Bunny 下钻偏好首次查询按冻结关系唯一映射自动迁移（缺失/歧义只清模型键），损坏的 models.dev 快照不再提供目录别名（明确映射保留）。PR #78 以 `--match-head-commit` 绑定复核 HEAD `3925771` 合并为 `9647ca1`；[Release 45190806275](https://github.com/ywltby/tokenscope/actions/runs/45190806275) 19 作业全成功无跳过（构建、安装测试、12 组单跳、present/deleted 两条连续升级链、publish），[同提交 main CI](https://github.com/ywltby/tokenscope/actions/runs/45190806151) 全绿；[Native UI E2E](https://github.com/ywltby/tokenscope/actions/runs/45190806223) 的 ui-refresh 在启动阶段 CDP 预算 45000ms 用尽（45012ms）失败、后续 13 场景跳过，根因未确认、保留未确认状态。[v0.9.7](https://github.com/ywltby/tokenscope/releases/tag/v0.9.7) 预发布已公开，标签解引用与 `build-metadata.json` 均指向 `9647ca1`，安装包 SHA256 `62019335…1fb69` 下载后与 `SHA256SUMS.txt` 及 GitHub 资产 digest 三方一致，四项资产齐全；v0.9.7 已登记升级基线（`select --current-version 0.9.8` 起点含 0.9.7）。安装与升级验证在 GitHub Runner 隔离环境完成，本机未安装、未触碰真实数据。
 

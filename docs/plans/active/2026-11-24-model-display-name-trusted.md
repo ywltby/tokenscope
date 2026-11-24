@@ -1,7 +1,7 @@
 # 模型展示名：正式名优先于 ID 抄写
 
 - 分支：`fix/model-display-name-trusted`，自 `origin/main` `61032b2107b2507e02c0b98a6fbb492b51f4ef83`（v0.9.7）。
-- 状态：方案记录，先写红测试再改实现。用户明确停在可审查状态：合并、发布、本机安装另行授权。
+- 状态：**已合并**（复核 HEAD `fe91311` → 合并提交 `fe07171`）并随 v0.9.8 预发布交付；本机未安装、未触碰真实数据。
 - 发行版本：仓库工具取号 **patch 0.9.8**（`--check --base-ref origin/main` = 0.9.8 / 0.9.7 / release true）。视图快照 23 → 24 自动重建。
 
 ## 1. 问题与证据
@@ -101,7 +101,7 @@
 - Rust：`cargo fmt --all --check` 与 `git diff --check` 干净；clippy 在 default 与 `--features acceptance` 下均 0 warning；`test default` 88 个测试目标全绿（0 失败），`test acceptance` 88 个目标、1082 个用例全绿（0 失败）。全程无 `LNK1104`、无 `query_expired`、无 panic。本机为 7 CU APU，acceptance 需重新链接全部测试二进制，整轮约 2 小时（`CARGO_BUILD_JOBS=2` 串行）。
 - 前端：`typecheck`、`format:check`、`build` 通过；`test` 1221/1222。唯一 1 例 `Settings.test.ts > initial_value_comes_from_settings_get` 在 5s 预算处超时——当时与 rustc 全量编译并行（82 个 worker 各约 1.9s 启动），该文件单独重跑用例耗时 3088ms 并 61 例全绿，判定为资源竞争下的时序抖动；未改超时阈值、未跳过断言。
 - 浏览器契约：`test:e2e` 的 17 个具名契约、1193 条断言全部通过，含本批直接相关的 `confirmed_model_stats_grouping`（11 条）与 `model_chart_readable_rows`（121 条）。
-- 提交 `14b8c0a` 经正常钩子（19 项全量检查）通过；PR #80 最新 HEAD 的必需检查：`gate`、`rust`、`rust-acceptance`、`contracts`、`frontend`、`install-test`、`native-ui`、`plan-upgrades` 均成功；`upgrade-test` 的 7 个基线（0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 / 0.6.0 / 0.9.7，各含 `deleted` 与 `present`）14 组全成功；`upgrade-chain` 按设计跳过。合计 21 项检查 20 成功 1 跳过，PR `mergeStateStatus=CLEAN`。
+- 提交 `14b8c0a` 经正常钩子（19 项全量检查）通过；PR #80 最新 HEAD 的必需检查：`gate`、`rust`、`rust-acceptance`、`contracts`、`frontend`、`install-test`、`native-ui`、`plan-upgrades` 均成功；`upgrade-test` 的 6 个基线（0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 / 0.6.0 / 0.9.7，各含 `deleted` 与 `present`）12 组全成功；`upgrade-chain` 按设计跳过。合计 21 项检查 20 成功 1 跳过，PR `mergeStateStatus=CLEAN`。
 - 顺带修掉一处工具链坑：Git Bash（MSYS）会把命令行参数里的 Windows 反斜杠路径转成混合斜杠，`SHCreateItemFromParsingName` 因此返回 `0x80070057`（E_INVALIDARG）。临时文件送回收站前必须经 `os.path.abspath()` 规范化，并复用 `scripts/run_rust_tests.py` 的 `_send_to_recycle_bin` / `_recycle_bin_holds` 复核 `$I` 条目。
 
 ### 7.3 门禁重跑记录
@@ -141,5 +141,13 @@
 - 正常提交钩子（selected 模式 6 条命令：`cargo fmt --check`、默认 clippy/test、acceptance clippy/test、暂存文档检查）全部通过，提交 `14c92a8`。
 - 首轮 acceptance 轮在链接阶段报 `LNK1104`（`rollup_applicability_round8/10` 的 `.exe` 无法打开），与本批代码无关；按计划 §4 已记录的仓库处置设 `CARGO_BUILD_JOBS=2` 后重跑钩子，两轮全绿——未跳过、未降低任何检查。
 - acceptance 轮覆盖 `model_identity_contract` 25 项、`confirmed_model_stats` 11 项、`model_alias_rollup_drilldown` 12 项、`model_alias_rollup_review` 7 项，均通过；本批未改前端，视图快照仍 v24，`test:e2e` 由 PR CI 全量复核。
-- PR #80 在 `dd22f6f`（产品提交 `14c92a8` + 本计划补记）上的必需检查：`gate`、`rust`、`rust-acceptance`、`contracts`、`frontend`、`install-test`、`native-ui`、`plan-upgrades` 全部成功；`upgrade-test` 的 7 个基线（0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 / 0.6.0 / 0.9.7，各含 `deleted` 与 `present`）14 组全成功，`upgrade-chain` 按设计跳过。合计 21 项检查 20 成功 1 跳过，PR `mergeStateStatus=CLEAN`。此后的文档补记不改变产品输入。
+- PR #80 在 `dd22f6f`（产品提交 `14c92a8` + 本计划补记）上的必需检查：`gate`、`rust`、`rust-acceptance`、`contracts`、`frontend`、`install-test`、`native-ui`、`plan-upgrades` 全部成功；`upgrade-test` 的 6 个基线（0.1.0 / 0.4.0 / 0.5.9 / 0.5.13 / 0.6.0 / 0.9.7，各含 `deleted` 与 `present`）12 组全成功，`upgrade-chain` 按设计跳过。合计 21 项检查 20 成功 1 跳过，PR `mergeStateStatus=CLEAN`。此后的文档补记不改变产品输入。
+
+## 10. 合并与发布记录（2026-11-24）
+
+- 用户独立复核通过后，PR #80 以 `--match-head-commit` 绑定复核 HEAD `fe91311` 合并为 **`fe07171`**（普通合并提交）；合并树与复核 HEAD 一致（`git diff fe91311 origin/main` 为空）。复核记录：本机完整价格目录 9578 条、合成夹具（官方只有 ID 时取渠道 `Claude Opus 4.7`，同末段另一模型 `aaa/...` 查询自身仍为 `Independent Model`）、Rust 定向 55 项通过。
+- 同提交三条流水线全成功：[CI 45351451323](https://github.com/ywltby/tokenscope/actions/runs/45351451323) 5 作业（`rust`、`rust-acceptance`、`contracts`、`frontend`、`gate`）、[Native UI E2E 45351451299](https://github.com/ywltby/tokenscope/actions/runs/45351451299)、[Release 45351451294](https://github.com/ywltby/tokenscope/actions/runs/45351451294) **19 作业全成功无跳过**（gate / plan-upgrades / build / install-test / 12 组单跳（0.1.0・0.4.0・0.5.9・0.5.13・0.6.0・0.9.7 各 `present` + `deleted`）/ `upgrade-chain` 的 `present` 与 `deleted` 两条连续升级链 / publish）。
+- [v0.9.8](https://github.com/ywltby/tokenscope/releases/tag/v0.9.8) 预发布已公开：标签解引用与 `build-metadata.json` 均指向 `fe07171`，四项资产齐全。安装包 SHA256 `079054ad…8eeb49` 下载重算后与 `SHA256SUMS.txt` 及 GitHub 资产 digest 三方一致；`build-metadata.json`（`084a365b…5d4207`）同样三方一致。持久格式指纹与 v0.9.7 相同（cache 12 / history 5 / parser 3 / identity 1 / pricing index 11 / settings 3）。
+- 已按流程登记 v0.9.8 升级基线（`upgrade_baselines.py add --tag v0.9.8` → `status: published`；`select --current-version 0.9.9` 起点与连续链均含 0.9.8），供下一批升级矩阵使用。
+- 构建、安装与升级验证全部在 GitHub Runner 隔离环境完成；本机未安装 v0.9.8，未触碰真实数据与 `~/.tokenscope`。
 
