@@ -118,13 +118,15 @@
 
 复核基线 `662531ddb93b6b17f759c0f047ef42fda93000e3`（PR #80 现有 HEAD）。合成目录三条同末段记录：`anthropic/claude-opus-4-7` 的 name 只是原始 ID；`known-relay/claude-opus-4-7` 的 `canonical_model_id` 明确指向 Anthropic 基础模型、name 为 `Claude Opus 4.7`；`aaa/claude-opus-4-7` 明确指向另一模型、name 为 `Independent Model`。一个反例 + 两个对照先红后绿：
 
-| 用例 | 修复前实测 | 修复后实测 |
+| 用例 | 修复前实测（基线 `662531d` 二进制） | 修复后实测 |
 | --- | --- | --- |
-| 上述夹具查 `claude-opus-4-7` / `anthropic/claude-opus-4-7` | `Independent Model` | `Claude Opus 4.7` |
+| 上述夹具查 `claude-opus-4-7` / `anthropic/claude-opus-4-7` | `Independent Model` / `Independent Model` | `Claude Opus 4.7` / `Claude Opus 4.7` |
 | 对照一：再加字典序更靠前、无任何身份关系的 `aab/claude-opus-4-7`（`Unverified Model`） | `Unverified Model` | `Claude Opus 4.7` |
-| 对照二：移除唯一合格渠道的名称 | `Independent Model` | `claude-opus-4-7`（该组原始 ID；官方名称也缺失时返回 `None`） |
+| 对照二：移除唯一合格渠道的名称 | `Independent Model` | `claude-opus-4-7`（该组原始 ID） |
+| 对照二补充：官方也无名称 | `Independent Model` | 缺失（`None`，聚合保留原始 ID） |
 
 - **根因**：`display_name_for` 确认了查询模型的基础身份，却把**同末段全部** models.dev 条目放进渠道候选；字典序靠前的无关渠道因此胜出。同末段只是检索键，不是身份证据。
+- **修复前实测**把基线 `pricing.rs` 临时换回工作区、用同一组合成目录跑一次性探针取得（跑后恢复实现文件并核对哈希、探针送回收站），不是按代码推断填表。
 - **实现**：新增 `Pricing::candidate_matches_base`，逐条核对候选——自身完整 ID 等于目标，或 `confirmed_base_for`（已核实映射 / 目录 `base_model` 关系）明确指向同一基础模型才入选；缺少关系、明确指向其它模型、关系冲突（统计层已丢弃映射）一律排除。`official` 仍取自身身份等于目标的条目，渠道池 = 合格候选；质量次序（官方正式名 → 已确认渠道正式名 → ID 抄写兜底）与稳定 `(display, name)` 序不变。删除不再需要的 `cross_channel` 放大分支。
 - **夹具显式身份**：`model_display_name_id_copy_official_falls_back_to_channel_name` 的 `abacus`、`model_display_name_official_priority_edge_cases` 的 `302ai` 补 `canonical_model_id` 指向 `anthropic/claude-opus-4-7`；`model_display_name_prefers_formal_name_over_id_copy` 补官方 `anthropic/claude-sonnet-4-6`（与本机目录形状一致，Sonnet 目标由官方自身条目确认）。
 - **未改**：版本仍 0.9.8、快照仍 v24；`Group.key`、`model_stats_key`、`canonical_identity_key`、下钻、CCS 覆盖、逐条计价与费用口径未动。
@@ -133,4 +135,10 @@
 
 - Rust 定向：`model_identity_contract` 25 项全绿（新增反例与两个对照）；`confirmed_model_stats` 11、`model_alias_rollup_drilldown` 12、`model_alias_rollup_review` 7 无回归。
 - **本机目录只读复核**（一次性临时探针，跑后送入回收站并核对 `$I` 条目；只读 `~/.tokenscope/pricing-modelsdev.json`，未写用户数据）：`claude-opus-4-7` 与 `anthropic/claude-opus-4-7` → `Claude Opus 4.7`；`claude-sonnet-4-6` 与官方完整 ID → `Claude Sonnet 4.6`；`gpt-5.4` 与 `openai/gpt-5.4` → `GPT-5.4`。本机 v4 快照 9578 条**无** `canonical_model_id` 关系、官方条目自带正式名，故由官方自身身份命中，结果与修复前一致。裸 `o3` 仍返回缺失——同末段有 21 个 models.dev 身份且无确认映射，属既有「唯一身份才确认」边界，与本批无关。
+
+### 9.2 门禁
+
+- 正常提交钩子（selected 模式 6 条命令：`cargo fmt --check`、默认 clippy/test、acceptance clippy/test、暂存文档检查）全部通过，提交 `14c92a8`。
+- 首轮 acceptance 轮在链接阶段报 `LNK1104`（`rollup_applicability_round8/10` 的 `.exe` 无法打开），与本批代码无关；按计划 §4 已记录的仓库处置设 `CARGO_BUILD_JOBS=2` 后重跑钩子，两轮全绿——未跳过、未降低任何检查。
+- acceptance 轮覆盖 `model_identity_contract` 25 项、`confirmed_model_stats` 11 项、`model_alias_rollup_drilldown` 12 项、`model_alias_rollup_review` 7 项，均通过；本批未改前端，视图快照仍 v24，`test:e2e` 由 PR CI 全量复核。
 
