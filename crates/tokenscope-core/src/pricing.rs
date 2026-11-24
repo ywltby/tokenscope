@@ -3238,8 +3238,10 @@ impl Pricing {
     ///    完整身份；裸 ID 只有在同末段仅有一个 models.dev 身份时才可确认，否则
     ///    返回 None（保留原始 ID）。名称的近似、相互包含与末段相同都**不**参与
     ///    身份判定。
-    /// 2. 候选：已确认基础模型时，同末段全部 models.dev 渠道都属于该模型；
-    ///    仅自身身份时只含该 ID 的条目，不跨命名空间借用。
+    /// 2. 候选（v0.9.8 补修三）：**同末段只是检索键**，每条候选都要单独核对
+    ///    身份——自身完整 ID 等于目标，或目录关系/已核实映射明确指向同一基础
+    ///    模型，才可参与选名。缺少关系、明确指向其它模型或关系冲突（映射被
+    ///    丢弃）的渠道一律排除，不因字典序靠前而胜出。
     /// 3. 取词：官方完整 ID 的正式名 → 已确认渠道的正式名 → 原始 ID 抄写兜底；
     ///    同级按稳定的 `(display, name)` 字典序。官方条目只有 ID 抄写或空白名时
     ///    继续使用渠道正式名。
@@ -3266,29 +3268,30 @@ impl Pricing {
             .find(|(alias, base)| structural == *alias || structural == *base)
             .map(|(_, base)| (*base).to_string())
             .or_else(|| self.model_stats.confirmed_base_for(model));
-        let (target, cross_channel) = match mapped {
-            // 已确认基础模型：其基础完整 ID 决定候选集合，允许同末段渠道参与取词。
-            Some(base) => (base, true),
-            // 带命名空间的自身身份：只认该 ID 自己的条目，不跨命名空间借用。
-            None if id.namespace().is_some() => (structural.clone(), false),
+        let target = match mapped {
+            Some(base) => base,
+            // 带命名空间的自身身份：目标就是该 ID 自己。
+            None if id.namespace().is_some() => structural.clone(),
             // 裸 ID 无确认依据：仅同末段唯一 models.dev 身份可确认。
-            None => (unique_modelsdev_identity(group)?, false),
+            None => unique_modelsdev_identity(group)?,
         };
         if usable.is_empty() {
             return None;
         }
 
-        // 2. 候选集合。
-        let official: Vec<&Entry> = usable
+        // 2. 候选：逐个核对身份，不从同末段直接凑池。
+        let qualified: Vec<&Entry> = usable
+            .iter()
+            .copied()
+            .filter(|e| self.candidate_matches_base(&e.display, &target))
+            .collect();
+        let official: Vec<&Entry> = qualified
             .iter()
             .copied()
             .filter(|e| ModelIdentity::parse(&e.display).identity_key() == target)
             .collect();
-        let channels: Vec<&Entry> = if cross_channel {
-            usable.clone()
-        } else {
-            official.clone()
-        };
+        // 渠道池已逐条核对，官方与渠道的名称质量次序仍保留。
+        let channels = qualified;
 
         // 3. 官方正式名 → 已确认渠道正式名 → 原始 ID 抄写兜底。
         for pool in [
@@ -3302,6 +3305,17 @@ impl Pricing {
             }
         }
         None
+    }
+
+    /// 候选身份核对（v0.9.8 补修三）：同末段只是检索键，**不是**身份证据。
+    /// 只有两种情形算同一基础模型——条目的**自身完整 ID 等于目标**，或目录
+    /// `base_model` 关系/已核实映射**明确指向目标**。缺少关系、明确指向其它
+    /// 模型、以及关系冲突（统计层已丢弃该映射）的条目都不参与选名。
+    fn candidate_matches_base(&self, display: &str, target: &str) -> bool {
+        if crate::model_identity::ModelIdentity::parse(display).identity_key() == target {
+            return true;
+        }
+        self.model_stats.confirmed_base_for(display).as_deref() == Some(target)
     }
 
     /// 模型统计分组键：聚合、图表数据、模型下钻、CCS 日行展示与下钻指纹共用。

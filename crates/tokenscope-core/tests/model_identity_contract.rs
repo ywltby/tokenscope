@@ -216,7 +216,8 @@ fn model_display_name_prefers_formal_name_over_id_copy() {
             "gpt-5.4": {"name": "GPT-5.4", "cost": {"input": 3, "output": 15}}
         }},
         "anthropic": {"models": {
-            "claude-opus-4-7": {"name": "Claude Opus 4.7", "cost": {"input": 3, "output": 15}}
+            "claude-opus-4-7": {"name": "Claude Opus 4.7", "cost": {"input": 3, "output": 15}},
+            "claude-sonnet-4-6": {"name": "Claude Sonnet 4.6", "cost": {"input": 3, "output": 15}}
         }},
         "openai": {"models": {
             "gpt-5.4": {"name": "GPT-5.4", "cost": {"input": 3, "output": 15}}
@@ -243,6 +244,9 @@ fn model_display_name_prefers_formal_name_over_id_copy() {
     let body2 = r#"{
         "openai": {"models": {
             "gpt-5.4": {"name": "GPT-5.4", "cost": {"input": 3, "output": 15}}
+        }},
+        "anthropic": {"models": {
+            "claude-opus-4-7": {"name": "Claude Opus 4.7", "cost": {"input": 3, "output": 15}}
         }},
         "abacus": {"models": {
             "claude-opus-4-7": {"name": "Claude Opus 4.7", "cost": {"input": 3, "output": 15}},
@@ -393,7 +397,8 @@ fn model_display_name_unnamed_namespace_does_not_borrow_sibling() {
 }
 
 /// v0.9.8 补修二（DN09）：官方条目 name 只是 ID 抄写时，应继续在同一模型
-/// 版本的已确认渠道里找正式名，而不是直接返回 ID。
+/// 版本的**已确认**渠道里找正式名，而不是直接返回 ID。补修三起，渠道须在目录里
+/// 明确声明 `canonical_model_id` 指向该基础模型；仅同末段不构成身份依据。
 #[test]
 fn model_display_name_id_copy_official_falls_back_to_channel_name() {
     let dir = tmp("official-id-copy");
@@ -405,7 +410,11 @@ fn model_display_name_id_copy_official_falls_back_to_channel_name() {
                 "claude-opus-4-7": {"name": "claude-opus-4-7", "cost": {"input": 3, "output": 15}}
             }},
             "abacus": {"models": {
-                "claude-opus-4-7": {"name": "Claude Opus 4.7", "cost": {"input": 3, "output": 15}}
+                "claude-opus-4-7": {
+                    "name": "Claude Opus 4.7",
+                    "canonical_model_id": "anthropic/claude-opus-4-7",
+                    "cost": {"input": 3, "output": 15}
+                }
             }}
         }"#,
     );
@@ -489,14 +498,18 @@ fn model_display_name_official_priority_edge_cases() {
         Some("Claude Opus 4.7")
     );
 
-    // 官方条目缺名 → 用已确认渠道（同末段正式名）兜底。
+    // 官方条目缺名 → 用**已确认**渠道（目录明确指向基础模型）的正式名兜底。
     let dir2 = tmp("official-missing-name");
     let snap2 = sync_to(
         &dir2,
         "md.json",
         r#"{
             "302ai": {"models": {
-                "claude-opus-4-7": {"name": "Claude 4.7 Opus", "cost": {"input": 3, "output": 15}}
+                "claude-opus-4-7": {
+                    "name": "Claude 4.7 Opus",
+                    "canonical_model_id": "anthropic/claude-opus-4-7",
+                    "cost": {"input": 3, "output": 15}
+                }
             }},
             "anthropic": {"models": {
                 "claude-opus-4-7": {"cost": {"input": 3, "output": 15}}
@@ -574,6 +587,140 @@ fn model_display_name_untrusted_id_returns_none() {
     );
     assert_eq!(p.display_name_for("grok-4.6-build"), None);
     assert_eq!(p.display_name_for("glm-5.2-x"), None);
+}
+
+/// DN11（v0.9.8 补修三）：同末段只是检索键，**不是身份证据**。查询模型的基础
+/// 身份确认后，每条渠道候选仍须单独核对——自身完整 ID 等于目标，或目录关系
+/// 明确指向同一基础模型，才可参与选名；缺少关系、明确指向其它模型或关系冲突
+/// 的渠道一律排除。合成目录复现：官方 name 只是原始 ID，`known-relay` 明确指向
+/// Anthropic 基础模型，`aaa` 明确指向另一个模型且字典序最靠前。
+#[test]
+fn model_display_name_requires_per_candidate_identity() {
+    let dir = tmp("candidate-identity");
+    let snap = sync_to(
+        &dir,
+        "md.json",
+        r#"{
+            "aaa": {"models": {
+                "claude-opus-4-7": {
+                    "name": "Independent Model",
+                    "canonical_model_id": "independent/claude-opus-4-7",
+                    "cost": {"input": 3, "output": 15}
+                }
+            }},
+            "anthropic": {"models": {
+                "claude-opus-4-7": {"name": "claude-opus-4-7", "cost": {"input": 3, "output": 15}}
+            }},
+            "known-relay": {"models": {
+                "claude-opus-4-7": {
+                    "name": "Claude Opus 4.7",
+                    "canonical_model_id": "anthropic/claude-opus-4-7",
+                    "cost": {"input": 3, "output": 15}
+                }
+            }}
+        }"#,
+    );
+    let (p, _w) = Pricing::load(None, Some(&snap), None);
+    assert_eq!(
+        p.display_name_for("claude-opus-4-7").as_deref(),
+        Some("Claude Opus 4.7"),
+        "明确指向其它模型的同末段渠道不得参与选名"
+    );
+    assert_eq!(
+        p.display_name_for("anthropic/claude-opus-4-7").as_deref(),
+        Some("Claude Opus 4.7"),
+        "带命名空间的官方查询同样只认已确认身份的渠道"
+    );
+
+    // 对照一：再加一条字典序更靠前、但**没有任何身份关系**的渠道——仍选正式名。
+    let dir2 = tmp("candidate-identity-unverified");
+    let snap2 = sync_to(
+        &dir2,
+        "md.json",
+        r#"{
+            "aab": {"models": {
+                "claude-opus-4-7": {"name": "Unverified Model", "cost": {"input": 3, "output": 15}}
+            }},
+            "anthropic": {"models": {
+                "claude-opus-4-7": {"name": "claude-opus-4-7", "cost": {"input": 3, "output": 15}}
+            }},
+            "known-relay": {"models": {
+                "claude-opus-4-7": {
+                    "name": "Claude Opus 4.7",
+                    "canonical_model_id": "anthropic/claude-opus-4-7",
+                    "cost": {"input": 3, "output": 15}
+                }
+            }}
+        }"#,
+    );
+    let (p2, _w2) = Pricing::load(None, Some(&snap2), None);
+    assert_eq!(
+        p2.display_name_for("claude-opus-4-7").as_deref(),
+        Some("Claude Opus 4.7"),
+        "无身份依据的渠道即使字典序更靠前也不参与选名"
+    );
+
+    // 对照二：移除唯一合格渠道的名称，回退该组原始 ID（官方条目只剩 ID 抄写）。
+    let dir3 = tmp("candidate-identity-no-channel-name");
+    let snap3 = sync_to(
+        &dir3,
+        "md.json",
+        r#"{
+            "aaa": {"models": {
+                "claude-opus-4-7": {
+                    "name": "Independent Model",
+                    "canonical_model_id": "independent/claude-opus-4-7",
+                    "cost": {"input": 3, "output": 15}
+                }
+            }},
+            "anthropic": {"models": {
+                "claude-opus-4-7": {"name": "claude-opus-4-7", "cost": {"input": 3, "output": 15}}
+            }},
+            "known-relay": {"models": {
+                "claude-opus-4-7": {
+                    "canonical_model_id": "anthropic/claude-opus-4-7",
+                    "cost": {"input": 3, "output": 15}
+                }
+            }}
+        }"#,
+    );
+    let (p3, _w3) = Pricing::load(None, Some(&snap3), None);
+    assert_eq!(
+        p3.display_name_for("claude-opus-4-7").as_deref(),
+        Some("claude-opus-4-7"),
+        "无合格正式名时回退该组原始 ID，不借其它模型的名称"
+    );
+
+    // 对照二补充：连官方 ID 抄写也没有时，解析器返回缺失，界面保留原始 ID。
+    let dir4 = tmp("candidate-identity-no-name");
+    let snap4 = sync_to(
+        &dir4,
+        "md.json",
+        r#"{
+            "aaa": {"models": {
+                "claude-opus-4-7": {
+                    "name": "Independent Model",
+                    "canonical_model_id": "independent/claude-opus-4-7",
+                    "cost": {"input": 3, "output": 15}
+                }
+            }},
+            "anthropic": {"models": {
+                "claude-opus-4-7": {"cost": {"input": 3, "output": 15}}
+            }},
+            "known-relay": {"models": {
+                "claude-opus-4-7": {
+                    "canonical_model_id": "anthropic/claude-opus-4-7",
+                    "cost": {"input": 3, "output": 15}
+                }
+            }}
+        }"#,
+    );
+    let (p4, _w4) = Pricing::load(None, Some(&snap4), None);
+    assert_eq!(
+        p4.display_name_for("claude-opus-4-7"),
+        None,
+        "整组没有合格名称时返回缺失，由聚合保留原始 ID"
+    );
 }
 
 #[test]
