@@ -192,6 +192,64 @@ fn group_tokens(group: &Group) -> [u64; 4] {
     [input, output, cache_write, cache_read]
 }
 
+/// v0.9.8（DN）：302ai 的 ID 抄写在目录里排前，也不得盖掉聚合表、图表与
+/// CCS 日汇总共用的正式名；请求明细保留原始 ID，费用用量不被改写。
+#[test]
+fn formal_display_name_shared_by_aggregate_chart_and_rollup() {
+    const OPUS: &str = "claude-opus-4-7";
+    let f = Fixture::new();
+    f.write_claude(&[claude(
+        "opus-native",
+        "2026-05-28T01:00:00Z",
+        OPUS,
+        [1500, 250, 0, 0],
+    )]);
+    f.seed_rollups(&[rollup("route", DAY, OPUS, 2, [2000, 400, 0, 0], Some(0.5))]);
+    f.write_modelsdev(json!([
+        {"id":"302ai/claude-opus-4-7", "name":"claude-opus-4-7", "input":3.0, "output":15.0, "cache_read":1.0},
+        {"id":"anthropic/claude-opus-4-7", "name":"Claude Opus 4.7", "input":3.0, "output":15.0, "cache_read":1.0}
+    ]));
+    let handle = begin_query(&f.opts).unwrap();
+    let report = query_summary(&handle.query_id).unwrap();
+    let group = only_group(&report);
+    assert_eq!(
+        group.key, "anthropic/claudeopus47",
+        "展示名不改变化既有确认别名产生的统计分组键"
+    );
+    assert_eq!(
+        group.label.as_deref(),
+        Some("Claude Opus 4.7"),
+        "聚合表与图表共用的标签是正式名，不是 302ai 的 ID 抄写"
+    );
+    close(group.source_cost_usd.unwrap(), 0.5);
+
+    let drill = query_events(
+        &handle.query_id,
+        &EventFilter {
+            model: Some(OPUS.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // 逐请求断言改为精确语义：原生行保留原始 ID；CCS 日行单独断言展示名与原始 ID。
+    let native_rows: Vec<_> = drill.rows.iter().filter(|r| r.rollup.is_none()).collect();
+    let rollup_rows: Vec<_> = drill.rows.iter().filter(|r| r.rollup.is_some()).collect();
+    assert_eq!(native_rows.len(), 1, "需含一条原生请求明细");
+    assert_eq!(rollup_rows.len(), 1, "需含一条 CCS 日汇总行");
+    assert_eq!(
+        native_rows[0].model, OPUS,
+        "原生 Opus 请求明细必须是原始 ID，不写展示名也不写统计分组键"
+    );
+    let meta = rollup_rows[0].rollup.as_ref().unwrap();
+    // 日行的 model 允许是统计分组键，但展示名与原始 ID 详情必须精确。
+    assert_eq!(
+        meta.label, "Claude Opus 4.7",
+        "CCS 日汇总展示名与聚合表一致"
+    );
+    assert_eq!(meta.models, [OPUS], "CCS 日行保留原始模型 ID 详情");
+    reconcile(group, &drill.rows);
+}
+
 #[test]
 fn workbuddy_and_imported_hy3_are_one_statistics_group() {
     let f = Fixture::new();

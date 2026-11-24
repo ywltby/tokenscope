@@ -80,7 +80,7 @@ describe("视图快照保存队列（R04）", () => {
     expect(warn).toHaveBeenCalled();
   });
 
-  it("SNAPSHOT_VERSION 为 23，忽略采用旧模型分组的 v22 视图快照", () => {
-    expect(SNAPSHOT_VERSION).toBe(23);
+  it("SNAPSHOT_VERSION 为 24，忽略采用旧展示名规则的 v23 视图快照", () => {
+    expect(SNAPSHOT_VERSION).toBe(24);
   });
 });
