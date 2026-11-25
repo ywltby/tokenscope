@@ -334,6 +334,93 @@ fn generated_catalog_same_leaf_alias_resolves_offline() {
     );
 }
 
+/// DN-C12：统计层接受同末段显式 canonical 关系，但该映射不得覆盖完整 ID
+/// 自身的规范名；两侧都有报价，确保不是无价名称路径掩盖问题。
+#[test]
+fn same_leaf_stats_mapping_does_not_override_own_catalog_name() {
+    let dir = tmp("same-leaf-stats");
+    let snap = sync(
+        &dir,
+        r#"{
+            "deepseek":{"models":{"deepseek-v4-flash":{
+                "name":"Snapshot Channel Flash",
+                "canonical_model_id":"sample-lab/deepseek-v4-flash",
+                "cost":{"input":1,"output":2}
+            }}},
+            "sample-lab":{"models":{"deepseek-v4-flash":{
+                "name":"Sample Lab Flash",
+                "cost":{"input":3,"output":4}
+            }}}
+        }"#,
+    );
+    let (p, _) = Pricing::load(None, Some(&snap), None);
+    assert_eq!(
+        p.model_stats_key("deepseek/deepseek-v4-flash"),
+        "samplelab/deepseekv4flash"
+    );
+    let own = p.display_name_resolution_for("deepseek/deepseek-v4-flash");
+    assert_eq!(own.name.as_deref(), Some("DeepSeek V4 Flash"), "{own:?}");
+    assert_eq!(
+        own.canonical_id.as_deref(),
+        Some("deepseek/deepseek-v4-flash"),
+        "{own:?}"
+    );
+    assert_eq!(own.reason, DisplayNameReason::ResolvedCatalog);
+    assert_eq!(
+        p.display_name_for("sample-lab/deepseek-v4-flash")
+            .as_deref(),
+        Some("Sample Lab Flash")
+    );
+}
+
+/// DN-C15：上游退休 provider 与 v2_only 规范模型不应让已有裸 ID 丢名；
+/// 生成器只补有提交证据的历史身份，当前上游改指向仍优先。
+#[test]
+fn retired_catalog_identities_keep_verified_offline_names() {
+    let (p, _) = Pricing::load(None, None, None);
+    let cases = [
+        ("Qwen2.5-7B-Instruct-Turbo", "Qwen2.5 7B Instruct"),
+        (
+            "Qwen3-235B-A22B-Instruct-2507-tput",
+            "Qwen3 235B-A22B Instruct 2507",
+        ),
+        ("databricks-claude-sonnet-4", "Claude Sonnet 4"),
+        ("databricks-gemini-2-5-flash", "Gemini 2.5 Flash"),
+        ("databricks-gemini-2-5-pro", "Gemini 2.5 Pro"),
+        ("databricks-gemini-3-pro", "Gemini 3 Pro Preview"),
+        ("databricks-kimi-k2-7-code", "Kimi K2.7 Code"),
+        ("doubao-seed-1-6-251015", "Seed 1.6"),
+        ("doubao-seed-1-6-flash-250828", "Seed 1.6 Flash"),
+        ("doubao-seed-1-8-251228", "Seed 1.8"),
+        ("kimi-k3-spot", "Kimi K3"),
+        ("mimo-v2-tts", "MiMo-V2-TTS"),
+        ("mimo-v2.5-tts", "MiMo-V2.5-TTS"),
+        ("mimo-v2.5-tts-voiceclone", "MiMo-V2.5-TTS-VoiceClone"),
+        ("mimo-v2.5-tts-voicedesign", "MiMo-V2.5-TTS-VoiceDesign"),
+        ("gemini-4-argon@us", "Gemini 4 Argon"),
+        ("gemma327b", "Gemma 3 27B IT"),
+    ];
+    for (id, name) in cases {
+        let r = p.display_name_resolution_for(id);
+        assert_eq!(r.name.as_deref(), Some(name), "{id}: {r:?}");
+        assert_eq!(r.reason, DisplayNameReason::ResolvedCatalog, "{id}");
+    }
+    let conflict = p.display_name_resolution_for("gemini-pro-latest");
+    assert_eq!(conflict.name, None, "{conflict:?}");
+    assert_eq!(conflict.reason, DisplayNameReason::AmbiguousIdentity);
+    assert_eq!(
+        p.display_name_for("databricks/databricks-gemini-3-1-flash-lite")
+            .as_deref(),
+        Some("Gemini 3.1 Flash Lite"),
+        "当前上游改指向不得被历史层覆盖"
+    );
+    assert_eq!(
+        p.display_name_for("fireworks-ai/accounts/fireworks/routers/kimi-latest")
+            .as_deref(),
+        Some("Kimi K3.1 Pro")
+    );
+}
+
 /// DN-C11：快照里的 canonical 关系也不得覆盖完整 ID 自身的规范名；没有自身
 /// 规范名的渠道条目仍按该关系取名。
 #[test]

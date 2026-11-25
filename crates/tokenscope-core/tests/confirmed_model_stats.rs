@@ -302,6 +302,198 @@ fn formal_display_name_shared_by_aggregate_chart_and_rollup() {
     reconcile(group2, &drill2.rows);
 }
 
+/// DN-C13：同末段统计映射进入 Group.key 后，原始型号自身的规范名仍须
+/// 成为聚合表、图表与 CCS 日行的共同标签；身份、覆盖、明细与计价不变。
+#[test]
+fn same_leaf_mapping_keeps_original_name_across_summary_chart_and_rollup() {
+    const CHILD: &str = "TOKENSCOPE_SAME_LEAF_LABEL_CHILD";
+    const TEST: &str = "same_leaf_mapping_keeps_original_name_across_summary_chart_and_rollup";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "同末段标签回归需在独立查询会话命名空间运行：{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    const ORIGINAL: &str = "deepseek/deepseek-v4-flash";
+    const ALIAS: &str = "sample-lab/deepseek-v4-flash";
+    for scenario in ["single", "multiple", "alias-only"] {
+        let f = Fixture::new();
+        let mut rows = vec![claude(
+            "same-leaf-original",
+            "2026-05-28T01:00:00Z",
+            ORIGINAL,
+            [1000, 200, 0, 0],
+        )];
+        let mut rolls = if scenario == "alias-only" {
+            vec![rollup(
+                "sample-lab",
+                "2026-05-29",
+                ALIAS,
+                1,
+                [600, 120, 0, 0],
+                Some(0.25),
+            )]
+        } else {
+            vec![rollup(
+                "deepseek",
+                DAY,
+                ORIGINAL,
+                2,
+                [2000, 400, 0, 0],
+                Some(0.5),
+            )]
+        };
+        if scenario != "single" {
+            rows.push(claude(
+                "same-leaf-alias",
+                "2026-05-29T01:00:00Z",
+                ALIAS,
+                [500, 100, 0, 0],
+            ));
+        }
+        if scenario == "multiple" {
+            rolls.push(rollup(
+                "sample-lab",
+                "2026-05-29",
+                ALIAS,
+                1,
+                [600, 120, 0, 0],
+                Some(0.25),
+            ));
+            rows.reverse();
+            rolls.reverse();
+        }
+        f.write_claude(&rows);
+        f.seed_rollups(&rolls);
+        f.write_modelsdev(json!([
+            {"id":ORIGINAL, "name":"Snapshot Channel Flash",
+             "canonical_model_id":ALIAS, "input":1.0, "output":2.0},
+            {"id":ALIAS, "name":"Sample Lab Flash", "input":3.0, "output":4.0}
+        ]));
+        let handle = begin_query(&f.opts).unwrap();
+        let report = query_summary(&handle.query_id).unwrap();
+        let group = only_group(&report);
+        assert_eq!(group.key, "samplelab/deepseekv4flash");
+        assert_eq!(group.label.as_deref(), Some("DeepSeek V4 Flash"));
+
+        if scenario == "alias-only" {
+            let drill = query_events(
+                &handle.query_id,
+                &EventFilter {
+                    model: Some(group.key.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(drill.total, 3);
+            let native = drill
+                .rows
+                .iter()
+                .find(|r| r.rollup.is_none() && r.model == ORIGINAL)
+                .unwrap();
+            assert_eq!(native.model, ORIGINAL);
+            let meta = drill
+                .rows
+                .iter()
+                .find(|r| r.rollup.is_some())
+                .unwrap()
+                .rollup
+                .as_ref()
+                .unwrap();
+            assert_eq!(meta.label, "DeepSeek V4 Flash");
+            assert_eq!(meta.models, [ALIAS]);
+            reconcile(group, &drill.rows);
+            drop(handle);
+            continue;
+        }
+
+        let multiple = scenario == "multiple";
+        close(
+            group.source_cost_usd.unwrap(),
+            if multiple { 0.75 } else { 0.5 },
+        );
+
+        let mut expected_models: Vec<&str> = if multiple {
+            vec![ORIGINAL, ALIAS]
+        } else {
+            vec![ORIGINAL]
+        };
+        expected_models.sort_unstable();
+        for &raw in &expected_models {
+            let drill = query_events(
+                &handle.query_id,
+                &EventFilter {
+                    model: Some(raw.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(drill.total, if multiple { 4 } else { 2 });
+            let native = drill
+                .rows
+                .iter()
+                .find(|r| r.rollup.is_none() && r.model == raw)
+                .unwrap();
+            assert_eq!(native.model, raw, "请求明细保留原始 ID");
+            let meta = drill
+                .rows
+                .iter()
+                .filter_map(|r| r.rollup.as_ref())
+                .find(|m| m.models.contains(&raw.to_string()))
+                .unwrap();
+            assert_eq!(meta.label, "DeepSeek V4 Flash");
+            assert_eq!(meta.models, [raw], "CCS 日行保留原始模型详情");
+            if multiple && raw == ALIAS {
+                assert_eq!(native.covered_by_rollup, None);
+            } else {
+                assert_eq!(
+                    native.covered_by_rollup.as_deref(),
+                    Some(if raw == ORIGINAL { DAY } else { "2026-05-29" }),
+                    "覆盖仍按原始 canonical 身份键判定"
+                );
+            }
+        }
+        let all = query_events(
+            &handle.query_id,
+            &EventFilter {
+                model: Some(ALIAS.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(all.total, if multiple { 4 } else { 2 });
+        let mut rollup_models: Vec<_> = all
+            .rows
+            .iter()
+            .filter_map(|r| r.rollup.as_ref().map(|m| m.models.clone()))
+            .collect();
+        rollup_models.sort();
+        let mut expected_rollups: Vec<Vec<String>> = expected_models
+            .iter()
+            .map(|raw| vec![(*raw).to_string()])
+            .collect();
+        expected_rollups.sort();
+        assert_eq!(rollup_models, expected_rollups);
+        let fees: Vec<_> = all.rows.iter().filter_map(|r| r.cost_usd).collect();
+        let expected_fees: Vec<f64> = if multiple {
+            vec![0.0019, 0.0038, 0.25, 0.5]
+        } else {
+            vec![0.0038, 0.5]
+        };
+        assert_eq!(fees, expected_fees, "名称修复不改逐条计价与 CCS 来源费用");
+        reconcile(group, &all.rows);
+        drop(handle);
+    }
+}
+
 #[test]
 fn workbuddy_and_imported_hy3_are_one_statistics_group() {
     let f = Fixture::new();

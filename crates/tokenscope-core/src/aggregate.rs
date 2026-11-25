@@ -26,6 +26,7 @@ struct GroupAccum {
 /// 命中且与条目顺序无关），其次该组原始模型名的稳定代表，绝不展示压缩后的
 /// 身份键（`claudeopus55` 这类写法只用于筛选与下钻匹配）。
 /// v0.9.4：下钻日汇总行复用同一展示名规则（聚合行与汇总行名称一致）。
+/// 组内原始型号自身有随包规范名时优先于统计分组键，避免同末段渠道借错型号。
 pub(crate) fn model_label(key: &str, representative: Option<&str>, pricing: &Pricing) -> String {
     // 已核实的 Hy3 组即使只含免费档贡献、或目录离线，也显示基础型号。
     if key == "tencent/hy3" {
@@ -33,7 +34,9 @@ pub(crate) fn model_label(key: &str, representative: Option<&str>, pricing: &Pri
     }
     let rep = representative.unwrap_or(key);
     pricing
-        .display_name_for(key)
+        .own_catalog_name_for(rep)
+        .or_else(|| pricing.own_catalog_name_for_group(key))
+        .or_else(|| pricing.display_name_for(key))
         .or_else(|| pricing.display_name_for(rep))
         .unwrap_or_else(|| rep.to_string())
 }

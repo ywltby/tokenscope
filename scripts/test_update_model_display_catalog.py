@@ -81,6 +81,107 @@ class BuildCatalogCase(unittest.TestCase):
             [{"id": "relay/demo-v2", "canonical_id": "publisher/demo-v2"}],
         )
 
+    def test_history_layer_restores_only_evidenced_entries_and_current_upstream_wins(self):
+        history = {
+            "models": [{"id": "publisher/old", "name": "Old Name"}],
+            "aliases": [
+                {"id": "retired/old", "canonical_id": "publisher/old"},
+                {"id": "relay/demo-v2", "canonical_id": "publisher/demo-v2"},
+            ],
+        }
+        catalog = build(
+            models(
+                {"id": "publisher/old", "name": "Corrected Name"},
+                {"id": "publisher/demo-v2", "name": "Demo V2"},
+                {"id": "publisher/demo-v3", "name": "Demo V3"},
+            ),
+            api(relay={"demo-v2": {"canonical_model_id": "publisher/demo-v3"}}),
+            "2026-11-25",
+            history,
+        )
+        self.assertEqual(
+            catalog["models"],
+            [
+                {"id": "publisher/demo-v2", "name": "Demo V2"},
+                {"id": "publisher/demo-v3", "name": "Demo V3"},
+                {"id": "publisher/old", "name": "Corrected Name"},
+            ],
+        )
+        self.assertEqual(
+            catalog["aliases"],
+            [
+                {"id": "relay/demo-v2", "canonical_id": "publisher/demo-v3"},
+                {"id": "retired/old", "canonical_id": "publisher/old"},
+            ],
+        )
+        self.assertEqual(catalog["source"]["history"]["models"], 0)
+        self.assertEqual(catalog["source"]["history"]["aliases"], 1)
+        reordered = {
+            **history,
+            "models": list(reversed(history["models"])),
+            "aliases": list(reversed(history["aliases"])),
+        }
+        self.assertEqual(
+            build(
+                models(
+                    {"id": "publisher/old", "name": "Corrected Name"},
+                    {"id": "publisher/demo-v2", "name": "Demo V2"},
+                    {"id": "publisher/demo-v3", "name": "Demo V3"},
+                ),
+                api(relay={"demo-v2": {"canonical_model_id": "publisher/demo-v3"}}),
+                "2026-11-25",
+                reordered,
+            ),
+            catalog,
+        )
+
+    def test_history_layer_rejects_missing_targets_and_self_reference(self):
+        for alias in [
+            {"id": "retired/demo", "canonical_id": "publisher/missing"},
+            {"id": "retired/demo", "canonical_id": "retired/demo"},
+        ]:
+            with self.subTest(alias=alias), self.assertRaises(ValueError):
+                build(
+                    models({"id": "publisher/demo", "name": "Demo"}),
+                    api(),
+                    "2026-11-25",
+                    {"aliases": [alias]},
+                )
+
+    def test_evidenced_history_fixture_covers_retired_aliases_and_v2_only_models(self):
+        import json
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        history = json.loads(
+            (root / "scripts/fixtures/model_display_catalog_history.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        current = {
+            entry["canonical_id"]: {
+                "id": entry["canonical_id"],
+                "name": "Current upstream name",
+            }
+            for entry in history["aliases"]
+        }
+        catalog = build(current, api(), "2026-11-25", history)
+        self.assertEqual(len(catalog["models"]), len(current) + 4)
+        self.assertEqual(len(catalog["aliases"]), 26)
+        self.assertEqual(catalog["source"]["history"]["models"], 4)
+        self.assertEqual(catalog["source"]["history"]["aliases"], 26)
+        for entry in history["aliases"]:
+            self.assertTrue(entry["reason"])
+            self.assertTrue(entry["evidence"].startswith("https://github.com/"))
+        weak = [
+            entry
+            for entry in history["aliases"]
+            if entry.get("evidence_strength") == "upstream_assumed"
+        ]
+        self.assertEqual([entry["id"] for entry in weak], [
+            "fireworks-ai/accounts/fireworks/routers/kimi-k3-spot"
+        ])
+
     def test_output_is_sorted_and_order_independent(self):
         models_forward = models(
             {"id": "publisher/demo-v2", "name": "Demo V2"},

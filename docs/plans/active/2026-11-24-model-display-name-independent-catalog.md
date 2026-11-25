@@ -153,8 +153,6 @@ canonical 关系与发布方页面，**不列为缺来源**。`catalog.json` 的
 
 ## 9. 复核补修批次（基线 `a9f509e`）
 
-目标版本仍为 **0.9.9**，沿用 PR #82，不重新取号、不改 `release-change.json`。
-
 ### 9.1 完整 ID 被渠道别名覆盖（红 → 绿）
 
 根因在 `NameCatalog::resolve`：渠道别名（`aliases`）与快照 `claims` 先于完整 ID
@@ -220,3 +218,100 @@ HEAD：规范模型 +6 / −4 / 0 改名；别名 +6964 / −21，另有 2 条�
   present/deleted）通过；`upgrade-chain` 按无连续升级链需求跳过。
 - Native UI E2E run [45585034318](https://github.com/ywltby/tokenscope/actions/runs/45585034318)：
   `native-ui` 9m40s 通过。`gh pr checks 82` 在最新 HEAD 上退出码 0。
+
+## 10. 二次复核补修批次（基线 `24c2871`）
+
+目标版本仍为 **0.9.9**，沿用 PR #82，不重新取号、不改 `release-change.json`。
+复核基线本地与 `origin/fix/model-display-name-catalog` 均为 `24c2871`；其 CI
+[45587706315](https://github.com/ywltby/tokenscope/actions/runs/45587706315)、
+Install test [45587706311](https://github.com/ywltby/tokenscope/actions/runs/45587706311)
+与 Native UI E2E [45587706307](https://github.com/ywltby/tokenscope/actions/runs/45587706307)
+全部通过（`upgrade-chain` 按无连续升级链需求跳过）。
+
+### 10.1 同末段统计映射不再覆盖完整 ID 规范名
+
+红测试用两侧有价的合成 v4 快照：`deepseek/deepseek-v4-flash` 自身规范名为
+`DeepSeek V4 Flash`，其 `canonical_model_id` 指向同末段
+`sample-lab/deepseek-v4-flash`，目标快照名为 `Sample Lab Flash`。修复前直接查询与
+聚合标签均实测为 `Sample Lab Flash`；统计键本身已正确为
+`samplelab/deepseekv4flash`，证明问题在展示链而非分组链。
+
+完整调用链：`Pricing::display_name_resolution_for` 把
+`ModelStatsGrouping::confirmed_base_for` 传入 `NameCatalog::resolve`，后者原先先取
+该基础键；聚合又与 CCS 日行共用 `aggregate::model_label`，并先查询 `Group.key`。
+因此只调换解析器顺序仍会让界面取到渠道目标名。
+
+修复规则：完整 ID 自身规范名 → 已确认基础模型 → 显式别名 → 快照 canonical →
+裸 ID 唯一目录身份。标签先在组内全部原始型号中稳定选择自身有规范名的代表，
+再回退分组键和普通解析；统计组标签从已确认指向该组的别名中稳定选择自身规范名，
+CCS 日行复用同一规则，跨日保持同一标签且不依赖单日代表。单别名、多别名与
+“仅 CCS 日行有别名”三种场景均断言聚合表/图表共用标签、每条 CCS 日行标签为
+`DeepSeek V4 Flash`，多别名输入倒序喂入；`Group.key`、实际分组、下钻、原始明细 ID、
+CCS 覆盖、逐条计价与四桶汇总保持原断言。四个完整 ID、11 个裸 ID 与仍需显式别名的
+Doubao 2.0 对照继续通过。该查询回归在独立子进程运行，避免新增会话与既有迁移测试
+并行争用进程级查询额度；默认并行度连续五轮通过。
+
+### 10.2 目录回退审计与可复现历史覆盖层
+
+用脚本按 Rust 的等价键、规范末段集合与别名目标集合复核 `a9f509e`、
+`24c2871` 和最终目录。`24c2871` 本身只改文档；`a9f509e → 24c2871` 的目录变化
+来自 `c49e5a1` 重新生成，而非 revert。生成器取消同末段过滤后新增 6964 条别名，
+但当时删除的 21 条均是上游 provider 条目退休/同步移除，**不是被同末段过滤**。
+最终公开抓取（2026-11-25）又删除 5 条 Eden AI / EmpirioLabs 别名；两类删除补丁
+均能在删除前 TOML 核实显式 `base_model`，故纳入有证据的历史覆盖层。
+
+`scripts/fixtures/model_display_catalog_history.json` 逐条记录 26 条历史别名与
+4 个 `v2_only` 规范模型的来源、原因与证据提交；生成器只补入这些条目，当前上游
+名称与改指向优先，目标缺失或自指直接报错，不自动合并整份旧目录。26 条别名包括：
+
+- Databricks 5 条：`databricks-claude-sonnet-4`、`databricks-gemini-2-5-flash`、
+  `databricks-gemini-2-5-pro`、`databricks-gemini-3-pro`、`databricks-kimi-k2-7-code`。
+- DeepInfra 1 条：`meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`。
+- Fireworks 1 条：`kimi-k3-spot`。删除前上游显式 `base_model`，但注释承认 Spot
+  路由未独立探测、身份为 assumed；夹具标为 `upstream_assumed` 弱证据，不伪装成已独立验证。
+- NanoGPT 1 条：`Kimi-K2-Instruct-0905`；ThinkingMachines 1 条：
+  `NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`。
+- TogetherAI 5 条：`Qwen2.5-7B-Instruct-Turbo`、
+  `Qwen3-235B-A22B-Instruct-2507-tput`、`Qwen3-Coder-480B-A35B-Instruct-FP8`、
+  `Qwen3-Coder-Next-FP8`、`Llama-3.3-70B-Instruct-Turbo`。
+- Volcengine / coding-plan 6 条：`doubao-seed-1-6-251015`、
+  `doubao-seed-1-6-flash-250828`、`doubao-seed-1-6-vision-250815`、
+  `doubao-seed-1-8-251228`、`doubao-seed-2.0-lite`、`doubao-seed-2.1-turbo`、
+  `doubao-seed-2-0-code-preview-260215`（共 7 条，含 coding-plan 两条）。
+- Eden AI 4 条：`gemini-4-argon`、`gemini-4-argon@eu`、`gemini-4-argon@us`、
+  `gemini-pro-latest`；EmpirioLabs 1 条：`gemma-3-27b`（删除前已标 deprecated）。
+
+`a9f509e` 中失去名称的 15 个裸 ID 已全部恢复：
+
+| 裸 ID | 恢复名称 |
+| --- | --- |
+| `doubao-seed-1-6-251015` | `Seed 1.6` |
+| `doubao-seed-1-6-flash-250828` | `Seed 1.6 Flash` |
+| `doubao-seed-1-8-251228` | `Seed 1.8` |
+| `kimi-k3-spot` | `Kimi K3` |
+| `databricks-claude-sonnet-4` | `Claude Sonnet 4` |
+| `databricks-gemini-2-5-flash` | `Gemini 2.5 Flash` |
+| `databricks-gemini-2-5-pro` | `Gemini 2.5 Pro` |
+| `databricks-gemini-3-pro` | `Gemini 3 Pro Preview` |
+| `databricks-kimi-k2-7-code` | `Kimi K2.7 Code` |
+| `Qwen2.5-7B-Instruct-Turbo` | `Qwen2.5 7B Instruct` |
+| `Qwen3-235B-A22B-Instruct-2507-tput` | `Qwen3 235B-A22B Instruct 2507` |
+| `mimo-v2-tts` | `MiMo-V2-TTS` |
+| `mimo-v2.5-tts` | `MiMo-V2.5-TTS` |
+| `mimo-v2.5-tts-voiceclone` | `MiMo-V2.5-TTS-VoiceClone` |
+| `mimo-v2.5-tts-voicedesign` | `MiMo-V2.5-TTS-VoiceDesign` |
+
+最终目录为 **644 个规范模型、8700 条别名**。相对 `a9f509e`：模型 +6 / −0 /
+0 改名；别名 +6964 / −0；2 条改指向均保留当前上游值：
+`databricks/databricks-gemini-3-1-flash-lite` → `google/gemini-3.1-flash-lite`、
+`fireworks-ai/accounts/fireworks/routers/kimi-latest` → `moonshotai/kimi-k3.1-pro`。
+裸 ID 无丢失、无新增歧义；新增 76 个可解析裸 ID，上述 Databricks 裸 ID 随上游
+更正从 `Gemini 3.1 Flash Lite Preview` 改为 `Gemini 3.1 Flash Lite`。相对
+`24c2871`：模型 +4、别名 +21，无删除/改名/改指向，恰好恢复 15 个丢名裸 ID，
+无其它裸 ID 解析变化。目录有 3 组等价键重复（标点差异），目标完全相同，不构成冲突。
+
+真实冲突 `gemini-pro-latest` 保持歧义：Eden AI 两条显式指向
+`google/gemini-4-argon`，Google 自身条目指向 `google/gemini-3.1-pro-preview`；
+不以字典序猜名。无证据撤回或更正旧映射；退休/deprecated/v2_only 是可用性变化，
+不是身份否定。生成器测试覆盖历史层优先级、乱序、真实同末段关系、缺失目标与自指；
+Rust 离线回归覆盖 15 个代表项、上述真实冲突、目录乱序、同末段显式别名与两条改指向。

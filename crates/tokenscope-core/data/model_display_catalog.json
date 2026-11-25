@@ -3,7 +3,13 @@
     "models": "https://models.dev/models.json",
     "aliases": "https://models.dev/api.json",
     "captured_at": "2026-11-25",
-    "note": "规范名来自 models.json；别名只取 api.json 中显式 canonical_model_id、目标在规范清单且不等于自身的条目。"
+    "note": "规范名来自 models.json；别名只取 api.json 中显式 canonical_model_id、目标在规范清单且不等于自身的条目。",
+    "history": {
+      "fixture": "scripts/fixtures/model_display_catalog_history.json",
+      "models": 4,
+      "aliases": 26,
+      "note": "仅补回有提交证据的历史身份；当前上游名称与改指向优先，不自动合并旧目录。"
+    }
   },
   "models": [
     {
@@ -2459,6 +2465,10 @@
       "name": "MiMo-V2-Pro"
     },
     {
+      "id": "xiaomi/mimo-v2-tts",
+      "name": "MiMo-V2-TTS"
+    },
+    {
       "id": "xiaomi/mimo-v2.5",
       "name": "MiMo-V2.5"
     },
@@ -2469,6 +2479,18 @@
     {
       "id": "xiaomi/mimo-v2.5-pro-ultraspeed",
       "name": "MiMo-V2.5-Pro-UltraSpeed"
+    },
+    {
+      "id": "xiaomi/mimo-v2.5-tts",
+      "name": "MiMo-V2.5-TTS"
+    },
+    {
+      "id": "xiaomi/mimo-v2.5-tts-voiceclone",
+      "name": "MiMo-V2.5-TTS-VoiceClone"
+    },
+    {
+      "id": "xiaomi/mimo-v2.5-tts-voicedesign",
+      "name": "MiMo-V2.5-TTS-VoiceDesign"
     },
     {
       "id": "xiaomi/mimo-v2.6-flash",
@@ -10077,6 +10099,10 @@
       "canonical_id": "anthropic/claude-opus-5-5"
     },
     {
+      "id": "databricks/databricks-claude-sonnet-4",
+      "canonical_id": "anthropic/claude-sonnet-4-20250514"
+    },
+    {
       "id": "databricks/databricks-claude-sonnet-4-5",
       "canonical_id": "anthropic/claude-sonnet-4-5"
     },
@@ -10095,6 +10121,14 @@
     {
       "id": "databricks/databricks-deepseek-v4-1-flash-1017",
       "canonical_id": "deepseek/deepseek-v4.1-flash-1017"
+    },
+    {
+      "id": "databricks/databricks-gemini-2-5-flash",
+      "canonical_id": "google/gemini-2.5-flash"
+    },
+    {
+      "id": "databricks/databricks-gemini-2-5-pro",
+      "canonical_id": "google/gemini-2.5-pro"
     },
     {
       "id": "databricks/databricks-gemini-3-1-flash-lite",
@@ -10123,6 +10157,10 @@
     {
       "id": "databricks/databricks-gemini-3-flash",
       "canonical_id": "google/gemini-3-flash-preview"
+    },
+    {
+      "id": "databricks/databricks-gemini-3-pro",
+      "canonical_id": "google/gemini-3-pro-preview"
     },
     {
       "id": "databricks/databricks-gemini-4-argon",
@@ -10235,6 +10273,10 @@
     {
       "id": "databricks/databricks-grok-4-7",
       "canonical_id": "xai/grok-4.7"
+    },
+    {
+      "id": "databricks/databricks-kimi-k2-7-code",
+      "canonical_id": "moonshotai/kimi-k2.7-code"
     },
     {
       "id": "databricks/databricks-kimi-k3",
@@ -10467,6 +10509,10 @@
     {
       "id": "deepinfra/meta-llama/Llama-3.3-70B-Instruct-Turbo",
       "canonical_id": "meta/llama-3.3-70b-instruct"
+    },
+    {
+      "id": "deepinfra/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+      "canonical_id": "meta/llama-4-maverick-17b-instruct"
     },
     {
       "id": "deepinfra/meta-llama/Llama-4-Scout-17B-16E-Instruct",
@@ -13338,6 +13384,10 @@
     },
     {
       "id": "fireworks-ai/accounts/fireworks/routers/kimi-k3-fast",
+      "canonical_id": "moonshotai/kimi-k3"
+    },
+    {
+      "id": "fireworks-ai/accounts/fireworks/routers/kimi-k3-spot",
       "canonical_id": "moonshotai/kimi-k3"
     },
     {
@@ -23841,6 +23891,10 @@
       "canonical_id": "mistral/mixtral-8x22b-instruct"
     },
     {
+      "id": "nano-gpt/moonshotai/Kimi-K2-Instruct-0905",
+      "canonical_id": "moonshotai/kimi-k2-0905"
+    },
+    {
       "id": "nano-gpt/moonshotai/kimi-k2.5",
       "canonical_id": "moonshotai/kimi-k2.5"
     },
@@ -33725,6 +33779,10 @@
       "canonical_id": "moonshotai/kimi-k3.1-pro"
     },
     {
+      "id": "thinkingmachines/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "canonical_id": "nvidia/nemotron-3-nano-30b-a3b"
+    },
+    {
       "id": "thinkingmachines/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
       "canonical_id": "nvidia/nemotron-3-super-120b-a12b"
     },
@@ -33869,6 +33927,22 @@
       "canonical_id": "prism-ml/ternary-bonsai-27b"
     },
     {
+      "id": "togetherai/Qwen/Qwen2.5-7B-Instruct-Turbo",
+      "canonical_id": "alibaba/qwen2.5-7b-instruct"
+    },
+    {
+      "id": "togetherai/Qwen/Qwen3-235B-A22B-Instruct-2507-tput",
+      "canonical_id": "alibaba/qwen3-235b-a22b-instruct-2507"
+    },
+    {
+      "id": "togetherai/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+      "canonical_id": "alibaba/qwen3-coder-480b-a35b-instruct"
+    },
+    {
+      "id": "togetherai/Qwen/Qwen3-Coder-Next-FP8",
+      "canonical_id": "alibaba/qwen3-coder-next"
+    },
+    {
       "id": "togetherai/Qwen/Qwen3.5-9B",
       "canonical_id": "alibaba/qwen3.5-9b"
     },
@@ -33911,6 +33985,10 @@
     {
       "id": "togetherai/elorian-labs/glimpse-1.0",
       "canonical_id": "elorian-labs/glimpse-1.0"
+    },
+    {
+      "id": "togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+      "canonical_id": "meta/llama-3.3-70b-instruct"
     },
     {
       "id": "togetherai/meta-models/Muse-Glimmer-30B",
@@ -36053,6 +36131,10 @@
       "canonical_id": "deepseek/deepseek-v4.1-flash"
     },
     {
+      "id": "volcengine-coding-plan/doubao-seed-2.0-lite",
+      "canonical_id": "bytedance-seed/seed-2.0-lite"
+    },
+    {
       "id": "volcengine-coding-plan/doubao-seed-2.0-mini",
       "canonical_id": "bytedance-seed/seed-2.0-mini"
     },
@@ -36063,6 +36145,10 @@
     {
       "id": "volcengine-coding-plan/doubao-seed-2.1-pro",
       "canonical_id": "bytedance-seed/seed-2.1-pro"
+    },
+    {
+      "id": "volcengine-coding-plan/doubao-seed-2.1-turbo",
+      "canonical_id": "bytedance-seed/seed-2.1-turbo"
     },
     {
       "id": "volcengine-coding-plan/doubao-seed-evolving",
@@ -36107,6 +36193,26 @@
     {
       "id": "volcengine/deepseek-v4-pro-ga-260813",
       "canonical_id": "deepseek/deepseek-v4-pro-0813"
+    },
+    {
+      "id": "volcengine/doubao-seed-1-6-251015",
+      "canonical_id": "bytedance-seed/seed-1-6"
+    },
+    {
+      "id": "volcengine/doubao-seed-1-6-flash-250828",
+      "canonical_id": "bytedance-seed/seed-1-6-flash"
+    },
+    {
+      "id": "volcengine/doubao-seed-1-6-vision-250815",
+      "canonical_id": "bytedance-seed/seed-1-6-vision"
+    },
+    {
+      "id": "volcengine/doubao-seed-1-8-251228",
+      "canonical_id": "bytedance-seed/seed-1-8"
+    },
+    {
+      "id": "volcengine/doubao-seed-2-0-code-preview-260215",
+      "canonical_id": "bytedance-seed/seed-2.0-code"
     },
     {
       "id": "volcengine/doubao-seed-2-0-lite-260428",

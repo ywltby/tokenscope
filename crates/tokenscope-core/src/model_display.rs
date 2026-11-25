@@ -328,6 +328,12 @@ impl NameCatalog {
         missing
     }
 
+    /// 仅取模型 ID 自身的随包规范名，不采用统计映射、显式别名或快照关系。
+    pub fn own_catalog_name(&self, model: &str) -> Option<String> {
+        let key = identity_key(model)?;
+        self.embedded.canonical.get(&key).cloned()
+    }
+
     /// 解析展示名；`confirmed_base` 是统计层已核实的基础完整 ID（离线也有效）。
     pub fn resolve(&self, model: &str, confirmed_base: Option<&str>) -> DisplayNameResolution {
         let id = ModelIdentity::parse(model);
@@ -335,12 +341,12 @@ impl NameCatalog {
             return DisplayNameResolution::unresolved(DisplayNameReason::EmptyKey);
         }
         let structural = id.identity_key();
-        let target = if let Some(base) = confirmed_base.and_then(identity_key) {
-            base
-        } else if self.embedded.canonical.contains_key(&structural) {
-            // 完整 ID 自身的规范名优先于任何渠道别名或快照 canonical 关系；
+        let target = if self.embedded.canonical.contains_key(&structural) {
+            // 完整 ID 自身的规范名优先于统计映射、渠道别名或快照 canonical；
             // 这些关系只补充没有自身规范名的条目。
             structural.clone()
+        } else if let Some(base) = confirmed_base.and_then(identity_key) {
+            base
         } else if let Some(target) = self.embedded.aliases.get(&structural) {
             target.clone()
         } else if let Some(target) = self.claims.get(&structural) {

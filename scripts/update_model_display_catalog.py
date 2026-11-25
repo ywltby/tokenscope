@@ -6,6 +6,8 @@ canonical_model_id 是发布目录显式给出的身份关系，用于补充规�
 末段命中的别名（例如 doubao-seed-2-0-pro-260215 -> bytedance-seed/seed-2.0-pro），
 以及末段相同但发布方不同的显式转发（relay/demo-v2 -> publisher/demo-v2）。
 末段相同不构成身份证据，解析侧只把该关系用于没有自身规范名的完整 ID。
+有提交证据的历史身份由 scripts/fixtures/model_display_catalog_history.json 补回；
+当前上游名称与改指向优先，不自动合并整份旧目录。
 
 用法：
     python -B scripts/update_model_display_catalog.py
@@ -24,6 +26,7 @@ import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "crates" / "tokenscope-core" / "data" / "model_display_catalog.json"
+HISTORY = ROOT / "scripts" / "fixtures" / "model_display_catalog_history.json"
 MODELS_URL = "https://models.dev/models.json"
 API_URL = "https://models.dev/api.json"
 
@@ -35,17 +38,34 @@ def fetch(url: str) -> dict:
         if proxy
         else urllib.request.build_opener()
     )
-    with opener.open(url, timeout=300) as response:
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "TokenScope-catalog-maintainer"}
+    )
+    with opener.open(request, timeout=300) as response:
         return json.load(response)
 
 
-def build(models: dict, api: dict, captured_at: str) -> dict:
-    canonical = {
-        entry["id"]: entry["name"]
-        for entry in models.values()
-        if isinstance(entry, dict) and entry.get("id") and entry.get("name")
-    }
+def build(models: dict, api: dict, captured_at: str, history: dict | None = None) -> dict:
+    canonical = {}
     aliases = {}
+    if history is not None:
+        for entry in history.get("models", []):
+            canonical[entry["id"]] = entry["name"]
+        for entry in history.get("aliases", []):
+            target = entry["canonical_id"]
+            if target == entry["id"]:
+                raise ValueError(f"历史别名不得自指: {entry['id']}")
+            aliases[entry["id"]] = target
+    canonical.update(
+        {
+            entry["id"]: entry["name"]
+            for entry in models.values()
+            if isinstance(entry, dict) and entry.get("id") and entry.get("name")
+        }
+    )
+    for alias, target in aliases.items():
+        if target not in canonical:
+            raise ValueError(f"历史别名目标不在最终规范清单: {alias} -> {target}")
     for provider, provider_body in api.items():
         for model_id, body in provider_body.get("models", {}).items():
             target = body.get("canonical_model_id") if isinstance(body, dict) else None
@@ -53,12 +73,26 @@ def build(models: dict, api: dict, captured_at: str) -> dict:
             if not isinstance(target, str) or target not in canonical or target == own_id:
                 continue
             aliases[own_id] = target
+    preserved_models = sum(
+        entry["id"] in canonical and canonical[entry["id"]] == entry["name"]
+        for entry in (history or {}).get("models", [])
+    )
+    preserved_aliases = sum(
+        aliases.get(entry["id"]) == entry["canonical_id"]
+        for entry in (history or {}).get("aliases", [])
+    )
     return {
         "source": {
             "models": MODELS_URL,
             "aliases": API_URL,
             "captured_at": captured_at,
             "note": "规范名来自 models.json；别名只取 api.json 中显式 canonical_model_id、目标在规范清单且不等于自身的条目。",
+            "history": {
+                "fixture": "scripts/fixtures/model_display_catalog_history.json",
+                "models": preserved_models,
+                "aliases": preserved_aliases,
+                "note": "仅补回有提交证据的历史身份；当前上游名称与改指向优先，不自动合并旧目录。",
+            },
         },
         "models": [
             {"id": model_id, "name": name}
@@ -91,7 +125,8 @@ def main() -> int:
         else fetch(API_URL)
     )
     captured_at = args.captured_at or dt.datetime.now(dt.timezone.utc).date().isoformat()
-    catalog = build(models, api, captured_at)
+    history = json.loads(HISTORY.read_text(encoding="utf-8"))
+    catalog = build(models, api, captured_at, history)
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     with OUTPUT.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write(json.dumps(catalog, ensure_ascii=False, indent=2) + "\n")

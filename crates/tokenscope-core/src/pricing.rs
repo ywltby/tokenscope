@@ -3153,6 +3153,28 @@ impl Pricing {
         self.display_names.resolve(model, base.as_deref())
     }
 
+    /// 模型 ID 自身的随包规范名；不采用统计分组、显式别名或快照 canonical 映射。
+    pub fn own_catalog_name_for(&self, model: &str) -> Option<String> {
+        self.display_names.own_catalog_name(model)
+    }
+
+    /// 统计组内已确认别名自身的规范名；仅使用显式映射，不把同末段当身份证据。
+    pub fn own_catalog_name_for_group(&self, model: &str) -> Option<String> {
+        let key = self.model_stats.key_for(model);
+        if self.display_names.own_catalog_name(&key).is_some() {
+            return None;
+        }
+        self.model_stats
+            .aliases_to(&key)
+            .filter_map(|alias| {
+                self.display_names
+                    .own_catalog_name(alias)
+                    .map(|name| (alias, name))
+            })
+            .min_by(|(a, _), (b, _)| a.cmp(b))
+            .map(|(_, name)| name)
+    }
+
     /// 按完整等价 ID 返回可信展示名；未命中返回 None，聚合保留原始 ID。
     ///
     /// 查询独立于报价索引：规范名称来自随程序发布的 `models.json`，快照中的
