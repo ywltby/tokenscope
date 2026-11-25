@@ -316,3 +316,25 @@ Doubao 2.0 对照继续通过。该查询回归在独立子进程运行，避免
 不以字典序猜名。无证据撤回或更正旧映射；退休/deprecated/v2_only 是可用性变化，
 不是身份否定。生成器测试覆盖历史层优先级、乱序、真实同末段关系、缺失目标与自指；
 Rust 离线回归覆盖 15 个代表项、上述真实冲突、目录乱序、同末段显式别名与两条改指向。
+
+### 10.3 本地门禁
+
+- `a65f2a8` 正常完整提交钩子通过：两模式 workspace clippy `-D warnings`、默认
+  327 项与 acceptance 328 项核心单测、全量 workspace 测试、前端 typecheck / format /
+  82 文件 1225 项单测 / build / 浏览器契约、脚本 422 项与文档检查。
+- 首次钩子暴露新增查询回归与既有迁移测试并行争用会话额度；改为独立子进程后，
+  默认并行度连续五轮通过。另一次 acceptance 链接遇到本机 PDB 缓存损坏，清理核心包
+  构建产物后完整钩子通过，未跳过任何检查。
+- `f81e0fa` 正常所选提交钩子通过：Rust fmt、两模式核心 clippy/test（acceptance
+  328 项）、脚本契约与文档检查；补入组键规范名优先和当前改指向先于历史目标校验的回归。
+
+### 10.4 PR CI（`f81e0fa`）
+
+- CI run [45630595906](https://github.com/ywltby/tokenscope/actions/runs/45630595906)：
+  `rust` 5m50s、`rust-acceptance` 4m45s、`contracts` 10m35s、`frontend` 10m33s、
+  `gate` 全部通过。
+- Install test run [45630595897](https://github.com/ywltby/tokenscope/actions/runs/45630595897)：
+  `install-test` 13m31s、`plan-upgrades` 与全部单跳升级用例（含 0.9.8
+  present/deleted）通过；`upgrade-chain` 按无连续升级链需求跳过。
+- Native UI E2E run [45630595961](https://github.com/ywltby/tokenscope/actions/runs/45630595961)：
+  `native-ui` 10m52s 通过。`gh pr checks 82` 在最新代码 HEAD 上退出码 0。
