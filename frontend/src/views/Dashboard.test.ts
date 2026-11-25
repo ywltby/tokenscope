@@ -2549,3 +2549,121 @@ it.each([false, true])(
     w.unmount();
   },
 );
+
+// ── v0.9.9 升级：v24 快照里的旧裸 ID 标签不得成为首屏 ─────────────────
+// v0.9.8 的聚合行显示原始裸 ID；v0.9.9 起由随包规范目录给出正式名。
+// v24 快照的标签不再可信：拒读后由首次成功查询重建，筛选偏好独立保留。
+const V24_OLD_LABEL = "deepseek-v4-flash";
+const V24_NEW_LABEL = "DeepSeek V4 Flash";
+
+function v24Report(label: string): SummaryReport {
+  return {
+    ...summaryA,
+    by: "model",
+    groups: [labelled("deepseek-v4-flash", 1000, label, 7)],
+    totals: group("合计", 1000),
+  };
+}
+
+function v24Payload(): Record<string, unknown> {
+  return {
+    v: 24,
+    saved_at: "2026-11-24T22:34:00Z",
+    filters: { by: "model", agent: "claude", preset: { kind: "days", days: 7 }, drill: null },
+    rollups_mode: "auto",
+    report: v24Report(V24_OLD_LABEL),
+    events,
+  };
+}
+
+/// 偏好与时区（默认 Asia/Shanghai）都与该快照匹配；唯一失效原因是格式版本。
+function useV24Preferences(): void {
+  localStorage.setItem(
+    VIEW_FILTERS_KEY,
+    JSON.stringify({
+      modelKeyVersion: MODEL_KEY_VERSION,
+      by: "model",
+      agent: "claude",
+      preset: { kind: "days", days: 7 },
+      rollupsMode: "auto",
+      drill: null,
+    }),
+  );
+}
+
+describe("Dashboard v0.9.9 升级（v24 视图快照拒读）", () => {
+  it("v24_snapshot_not_restored_on_first_frame：挂起首次查询时旧裸 ID 标签不得回显", async () => {
+    useV24Preferences();
+    let resolveSummary!: (v: SummaryReport) => void;
+    let resolveEvents!: (v: EventList) => void;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(v24Payload());
+      // 挂起首次查询：首屏只可能来自快照。
+      if (cmd === "query_summary") return new Promise((r) => (resolveSummary = r));
+      if (cmd === "query_events") return new Promise((r) => (resolveEvents = r));
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(state(w)["report"], "v24 的旧裸 ID 标签不得恢复为首帧").toBeNull();
+    expect(state(w)["events"], "v24 的明细不得恢复为首帧").toBeNull();
+    expect(state(w)["stale"]).toBe(false);
+    expect(w.text()).not.toContain("缓存数据");
+    expect(w.text()).not.toContain(V24_OLD_LABEL);
+    // 拒读快照不等于丢偏好：来源/维度/预设/日粒度参与方式照常生效。
+    expect(state(w)["by"]).toBe("model");
+    expect(state(w)["agent"]).toBe("claude");
+    expect(state(w)["preset"]).toEqual({ kind: "days", days: 7 });
+    expect(state(w)["rollupsMode"]).toBe("auto");
+    expect(state(w)["drill"]).toBeNull();
+
+    resolveSummary(v24Report(V24_NEW_LABEL));
+    resolveEvents(events);
+    await flushPromises();
+    await nextTick();
+    await flushPromises();
+    await snapshotQueueIdle();
+    const report = state(w)["report"] as SummaryReport;
+    expect(report.groups[0].label).toBe(V24_NEW_LABEL);
+    expect(w.text()).not.toContain(V24_OLD_LABEL);
+    expect(state(w)["stale"]).toBe(false);
+    const save = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save").at(-1);
+    const saved = (save?.[1] as { value: { v: number; report: SummaryReport; filters: unknown } })
+      .value;
+    expect(saved.v, "新快照必须使用当前视图版本").toBe(SNAPSHOT_VERSION);
+    expect(saved.report.groups[0].label).toBe(V24_NEW_LABEL);
+    expect(saved.filters).toEqual({
+      by: "model",
+      agent: "claude",
+      preset: { kind: "days", days: 7 },
+      drill: null,
+    });
+    w.unmount();
+  });
+
+  it("v24_snapshot_not_shown_on_first_query_failure：首次查询失败不回显旧标签", async () => {
+    useV24Preferences();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(v24Payload());
+      if (cmd === "query_summary") return Promise.reject(new Error("net down"));
+      if (cmd === "query_events") return Promise.reject(new Error("net down"));
+      if (cmd === "collection_status") return Promise.resolve(collectionStatusOk());
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(w.find(".page-head .ts-status-pill").text()).toContain("刷新失败");
+    expect(state(w)["report"]).toBeNull();
+    expect(state(w)["events"]).toBeNull();
+    expect(state(w)["stale"]).toBe(false);
+    expect(w.text()).not.toContain("缓存数据");
+    expect(w.text()).not.toContain(V24_OLD_LABEL);
+    await snapshotQueueIdle();
+    expect(invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save")).toHaveLength(0);
+    w.unmount();
+  });
+});

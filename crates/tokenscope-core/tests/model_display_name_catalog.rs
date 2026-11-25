@@ -272,3 +272,105 @@ fn catalog_resolution_records_canonical_identity() {
         Some("bytedance-seed/seed-2.0-pro")
     );
 }
+
+/// DN-C09：完整 ID 自身在规范目录中有正式名时，渠道别名不得覆盖它；对应裸
+/// ID 仍按规范末段落位，日期变体与基础版各用各的名字。
+#[test]
+fn full_id_own_catalog_name_beats_channel_alias() {
+    let (p, _) = Pricing::load(None, None, None);
+    let cases = [
+        ("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash"),
+        ("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro"),
+        (
+            "deepseek/deepseek-v4-flash-vision-exp",
+            "DeepSeek V4 Flash Vision Exp",
+        ),
+        (
+            "moonshotai/kimi-k2.7-code-highspeed",
+            "Kimi K2.7 Code Highspeed",
+        ),
+        ("deepseek-v4-flash", "DeepSeek V4 Flash"),
+        ("deepseek-v4-pro", "DeepSeek V4 Pro"),
+        (
+            "deepseek-v4-flash-vision-exp",
+            "DeepSeek V4 Flash Vision Exp",
+        ),
+        ("kimi-k2.7-code-highspeed", "Kimi K2.7 Code Highspeed"),
+        ("deepseek/deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731"),
+        ("deepseek/deepseek-v4-pro-0813", "DeepSeek V4 Pro 0813"),
+        (
+            "deepseek/deepseek-v4.1-flash-1017",
+            "DeepSeek V4.1 Flash 1017",
+        ),
+        ("deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731"),
+        ("deepseek-v4-pro-0813", "DeepSeek V4 Pro 0813"),
+        ("deepseek-v4.1-flash-1017", "DeepSeek V4.1 Flash 1017"),
+    ];
+    for (id, name) in cases {
+        let r = p.display_name_resolution_for(id);
+        assert_eq!(r.name.as_deref(), Some(name), "{id}: {r:?}");
+        assert_eq!(r.reason, DisplayNameReason::ResolvedCatalog, "{id}");
+        assert_eq!(r.source, "models.json", "{id}");
+    }
+    // 无自身规范名的渠道仍可按显式别名取名。
+    assert_eq!(
+        p.display_name_for("opencode/deepseek-v4-flash").as_deref(),
+        Some("DeepSeek V4 Flash 0731")
+    );
+}
+
+/// DN-C10：重新生成的随包目录保留末段相同的显式别名，完整 ID 与裸 ID 都能
+/// 离线使用这条关系。
+#[test]
+fn generated_catalog_same_leaf_alias_resolves_offline() {
+    let (p, _) = Pricing::load(None, None, None);
+    let r = p.display_name_resolution_for("302ai/MiniMax-M2");
+    assert_eq!(r.name.as_deref(), Some("MiniMax-M2"), "{r:?}");
+    assert_eq!(r.canonical_id.as_deref(), Some("minimax/MiniMax-M2"));
+    assert_eq!(r.reason, DisplayNameReason::ResolvedCatalog);
+    assert_eq!(
+        p.display_name_for("minimax-m2").as_deref(),
+        Some("MiniMax-M2")
+    );
+}
+
+/// DN-C11：快照里的 canonical 关系也不得覆盖完整 ID 自身的规范名；没有自身
+/// 规范名的渠道条目仍按该关系取名。
+#[test]
+fn snapshot_canonical_claim_does_not_override_own_catalog_name() {
+    let dir = tmp("claim-vs-own");
+    let snap = sync(
+        &dir,
+        r#"{
+            "zhipuai":{"models":{
+                "glm-5.2":{
+                    "name":"GLM-5.2 0901",
+                    "canonical_model_id":"zhipuai/glm-5.2-0901",
+                    "cost":{"input":1,"output":2}
+                },
+                "glm-5.2-0901":{
+                    "name":"GLM-5.2 0901",
+                    "cost":{"input":1,"output":2}
+                }
+            }},
+            "relay":{"models":{"demo-pro-9":{
+                "name":"Relay Demo Pro",
+                "canonical_model_id":"publisher/demo-pro-9",
+                "cost":{"input":1,"output":2}
+            }}},
+            "publisher":{"models":{"demo-pro-9":{
+                "name":"Demo Pro Nine",
+                "cost":{"input":1,"output":2}
+            }}}
+        }"#,
+    );
+    let (p, _) = Pricing::load(None, Some(&snap), None);
+    let own = p.display_name_resolution_for("zhipuai/glm-5.2");
+    assert_eq!(own.name.as_deref(), Some("GLM-5.2"), "{own:?}");
+    assert_eq!(own.canonical_id.as_deref(), Some("zhipuai/glm-5.2"));
+    // 没有自身规范名的渠道仍使用快照的显式关系。
+    assert_eq!(
+        p.display_name_for("relay/demo-pro-9").as_deref(),
+        Some("Demo Pro Nine")
+    );
+}

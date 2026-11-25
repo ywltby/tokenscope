@@ -2,8 +2,10 @@
 """从 models.dev 公开目录重建嵌入的展示名数据。
 
 models.json 提供规范模型 ID 与模型级 name（无价格）；api.json 的
-canonical_model_id 是发布目录显式给出的身份关系，只用于补充规范清单无法按
-末段命中的别名（例如 doubao-seed-2-0-pro-260215 -> bytedance-seed/seed-2.0-pro）。
+canonical_model_id 是发布目录显式给出的身份关系，用于补充规范清单无法按
+末段命中的别名（例如 doubao-seed-2-0-pro-260215 -> bytedance-seed/seed-2.0-pro），
+以及末段相同但发布方不同的显式转发（relay/demo-v2 -> publisher/demo-v2）。
+末段相同不构成身份证据，解析侧只把该关系用于没有自身规范名的完整 ID。
 
 用法：
     python -B scripts/update_model_display_catalog.py
@@ -37,11 +39,6 @@ def fetch(url: str) -> dict:
         return json.load(response)
 
 
-def leaf_key(model_id: str) -> str:
-    leaf = model_id.rsplit("/", 1)[-1]
-    return "".join(c for c in leaf.lower() if c not in "-._")
-
-
 def build(models: dict, api: dict, captured_at: str) -> dict:
     canonical = {
         entry["id"]: entry["name"]
@@ -53,12 +50,7 @@ def build(models: dict, api: dict, captured_at: str) -> dict:
         for model_id, body in provider_body.get("models", {}).items():
             target = body.get("canonical_model_id") if isinstance(body, dict) else None
             own_id = f"{provider}/{model_id}"
-            if (
-                not isinstance(target, str)
-                or target not in canonical
-                or target == own_id
-                or leaf_key(own_id.rsplit("/", 1)[-1]) == leaf_key(target.rsplit("/", 1)[-1])
-            ):
+            if not isinstance(target, str) or target not in canonical or target == own_id:
                 continue
             aliases[own_id] = target
     return {
@@ -66,7 +58,7 @@ def build(models: dict, api: dict, captured_at: str) -> dict:
             "models": MODELS_URL,
             "aliases": API_URL,
             "captured_at": captured_at,
-            "note": "规范名来自 models.json；别名只取 api.json 中显式 canonical_model_id 且末段不同的条目。",
+            "note": "规范名来自 models.json；别名只取 api.json 中显式 canonical_model_id、目标在规范清单且不等于自身的条目。",
         },
         "models": [
             {"id": model_id, "name": name}

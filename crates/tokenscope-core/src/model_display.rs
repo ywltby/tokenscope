@@ -85,12 +85,10 @@ struct EmbeddedIndex {
 
 static EMBEDDED: OnceLock<Arc<EmbeddedIndex>> = OnceLock::new();
 
-fn embedded() -> &'static Arc<EmbeddedIndex> {
-    EMBEDDED.get_or_init(|| {
-        let data: EmbeddedCatalog =
-            serde_json::from_str(include_str!("../data/model_display_catalog.json"))
-                .expect("嵌入的展示名目录必须可解析");
-        let mut index = EmbeddedIndex::default();
+impl EmbeddedIndex {
+    fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        let data: EmbeddedCatalog = serde_json::from_str(json)?;
+        let mut index = Self::default();
         for model in &data.models {
             let Some(key) = identity_key(&model.id) else {
                 continue;
@@ -110,7 +108,16 @@ fn embedded() -> &'static Arc<EmbeddedIndex> {
             let leaf = ModelIdentity::parse(&alias.id).leaf_key().to_string();
             index.alias_leaf.entry(leaf).or_default().insert(to);
         }
-        Arc::new(index)
+        Ok(index)
+    }
+}
+
+fn embedded() -> &'static Arc<EmbeddedIndex> {
+    EMBEDDED.get_or_init(|| {
+        Arc::new(
+            EmbeddedIndex::from_json(include_str!("../data/model_display_catalog.json"))
+                .expect("嵌入的展示名目录必须可解析"),
+        )
     })
 }
 
@@ -330,11 +337,15 @@ impl NameCatalog {
         let structural = id.identity_key();
         let target = if let Some(base) = confirmed_base.and_then(identity_key) {
             base
+        } else if self.embedded.canonical.contains_key(&structural) {
+            // 完整 ID 自身的规范名优先于任何渠道别名或快照 canonical 关系；
+            // 这些关系只补充没有自身规范名的条目。
+            structural.clone()
         } else if let Some(target) = self.embedded.aliases.get(&structural) {
             target.clone()
         } else if let Some(target) = self.claims.get(&structural) {
             target.clone()
-        } else if self.embedded.canonical.contains_key(&structural) || id.namespace().is_some() {
+        } else if id.namespace().is_some() {
             structural.clone()
         } else {
             let leaf = id.leaf_key();
@@ -393,6 +404,133 @@ impl NameCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn catalog_from(json: &str) -> NameCatalog {
+        NameCatalog {
+            embedded: Arc::new(EmbeddedIndex::from_json(json).expect("合成目录必须可解析")),
+            snapshot_ids: BTreeSet::new(),
+            claims: HashMap::new(),
+            snapshot_names: HashMap::new(),
+        }
+    }
+
+    /// 生成器保留末段相同的显式别名后，完整 ID 与裸 ID 都能离线使用该关系。
+    #[test]
+    fn same_leaf_explicit_alias_resolves_offline() {
+        let forward = r#"{
+            "models": [
+                {"id": "publisher/demo-v2", "name": "Demo V2"},
+                {"id": "publisher/demo-v3", "name": "Demo V3"}
+            ],
+            "aliases": [
+                {"id": "relay/demo-v2", "canonical_id": "publisher/demo-v2"},
+                {"id": "relay/demo-v3", "canonical_id": "publisher/demo-v3"}
+            ]
+        }"#;
+        let reversed = r#"{
+            "aliases": [
+                {"id": "relay/demo-v3", "canonical_id": "publisher/demo-v3"},
+                {"id": "relay/demo-v2", "canonical_id": "publisher/demo-v2"}
+            ],
+            "models": [
+                {"id": "publisher/demo-v3", "name": "Demo V3"},
+                {"id": "publisher/demo-v2", "name": "Demo V2"}
+            ]
+        }"#;
+        for json in [forward, reversed] {
+            let catalog = catalog_from(json);
+            let relay = catalog.resolve("relay/demo-v2", None);
+            assert_eq!(relay.name.as_deref(), Some("Demo V2"), "{relay:?}");
+            assert_eq!(
+                relay.canonical_id.as_deref(),
+                Some("publisher/demo-v2"),
+                "{relay:?}"
+            );
+            assert_eq!(
+                catalog.resolve("publisher/demo-v2", None).name.as_deref(),
+                Some("Demo V2")
+            );
+            assert_eq!(
+                catalog.resolve("demo-v2", None).name.as_deref(),
+                Some("Demo V2")
+            );
+            assert_eq!(
+                catalog.resolve("relay/demo-v3", None).name.as_deref(),
+                Some("Demo V3")
+            );
+        }
+    }
+
+    /// 两个发布方确有不同型号：带前缀的完整 ID 各用自己的名称，无法确认身份
+    /// 的裸 ID 保留原文；目录乱序不改变结果。
+    #[test]
+    fn same_leaf_publishers_keep_own_names_and_bare_stays_raw() {
+        let forward = r#"{
+            "models": [
+                {"id": "author-a/demo-x", "name": "Demo A One"},
+                {"id": "author-b/demo-x", "name": "Demo B Two"}
+            ],
+            "aliases": [{"id": "relay/demo-x", "canonical_id": "author-a/demo-x"}]
+        }"#;
+        let reversed = r#"{
+            "aliases": [{"id": "relay/demo-x", "canonical_id": "author-a/demo-x"}],
+            "models": [
+                {"id": "author-b/demo-x", "name": "Demo B Two"},
+                {"id": "author-a/demo-x", "name": "Demo A One"}
+            ]
+        }"#;
+        for json in [forward, reversed] {
+            let catalog = catalog_from(json);
+            assert_eq!(
+                catalog.resolve("author-a/demo-x", None).name.as_deref(),
+                Some("Demo A One")
+            );
+            assert_eq!(
+                catalog.resolve("author-b/demo-x", None).name.as_deref(),
+                Some("Demo B Two")
+            );
+            assert_eq!(
+                catalog.resolve("relay/demo-x", None).name.as_deref(),
+                Some("Demo A One")
+            );
+            let bare = catalog.resolve("demo-x", None);
+            assert_eq!(bare.name, None, "{bare:?}");
+            assert_eq!(bare.reason, DisplayNameReason::AmbiguousIdentity);
+        }
+    }
+
+    /// 完整 ID 自身的规范名优先于同末段别名（即使别名来源本身也是规范模型）。
+    #[test]
+    fn own_canonical_name_beats_same_leaf_alias() {
+        let forward = r#"{
+            "models": [
+                {"id": "publisher/demo-v2", "name": "Demo V2"},
+                {"id": "relay/demo-v2", "name": "Relay Demo V2"}
+            ],
+            "aliases": [{"id": "relay/demo-v2", "canonical_id": "publisher/demo-v2"}]
+        }"#;
+        let reversed = r#"{
+            "aliases": [{"id": "relay/demo-v2", "canonical_id": "publisher/demo-v2"}],
+            "models": [
+                {"id": "relay/demo-v2", "name": "Relay Demo V2"},
+                {"id": "publisher/demo-v2", "name": "Demo V2"}
+            ]
+        }"#;
+        for json in [forward, reversed] {
+            let catalog = catalog_from(json);
+            assert_eq!(
+                catalog.resolve("publisher/demo-v2", None).name.as_deref(),
+                Some("Demo V2")
+            );
+            assert_eq!(
+                catalog.resolve("relay/demo-v2", None).name.as_deref(),
+                Some("Relay Demo V2")
+            );
+            let bare = catalog.resolve("demo-v2", None);
+            assert_eq!(bare.name, None, "{bare:?}");
+            assert_eq!(bare.reason, DisplayNameReason::AmbiguousIdentity);
+        }
+    }
 
     #[test]
     fn embedded_catalog_has_verified_names() {

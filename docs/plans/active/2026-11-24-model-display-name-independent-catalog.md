@@ -2,7 +2,7 @@
 
 - 分支：`fix/model-display-name-catalog`，基线 `origin/main` `fe07171`（v0.9.8）。
 - 状态：**实施完成，PR [#82](https://github.com/ywltby/tokenscope/pull/82) 待审查**；
-  `79ed3b7` 的必需 CI 全绿，见 §8。
+  `79ed3b7` 的必需 CI 全绿，见 §8；复核补修批次见 §9。
 - 发行版本：产品输入改动，按仓库工具取 patch **0.9.9**；视图快照 24 → 25。
 - 发布准备：上一版 `v0.9.8` 已用 `scripts/upgrade_baselines.py add` 登记，
   `check --base-ref origin/main` 通过（资产逐个下载核对哈希）。
@@ -145,7 +145,64 @@ canonical 关系与发布方页面，**不列为缺来源**。`catalog.json` 的
   作为同末段近似名的对照。
 - `79ed3b7` 的 PR CI：`rust`、`rust-acceptance`、`contracts`、`frontend`、`gate`、
   `install-test`、`native-ui` 全部通过。
-- 附带改动：`frontend/vitest.config.ts` 的 `testTimeout` 5s → 20s。`Settings.test.ts`
-  的 U06 用例含 1.5s 保存串行队列等待，单独跑 1.5–2.0s；在 windows-latest（4 vCPU）
-  与本地「Rust 构建后立刻跑前端」的负载下连续三次超时（不是断言失败）。用例集合与
-  断言不变。
+- 前端超时（本批复核后还原）：曾把 `testTimeout` 5s → 20s，理由记为 U06 用例含
+  1.5s 队列等待。复核发现 `settingQueue` 以微任务排空、测试用立即 resolve 的保存
+  函数，并无固定 1.5s 等待；5s 默认下 `Settings.test.ts` 61 项最慢 1.59s、全量
+  82 文件 1225 项通过。已删除该全局覆盖，恢复 Vitest 默认 5s，不设逐用例覆写，
+  用例集合与行为断言未改。
+
+## 9. 复核补修批次（基线 `a9f509e`）
+
+目标版本仍为 **0.9.9**，沿用 PR #82，不重新取号、不改 `release-change.json`。
+
+### 9.1 完整 ID 被渠道别名覆盖（红 → 绿）
+
+根因在 `NameCatalog::resolve`：渠道别名（`aliases`）与快照 `claims` 先于完整 ID
+自身的规范条目被查询。随包目录离线实测的修复前后：
+
+| 完整 ID | 修复前 | 修复后 |
+| --- | --- | --- |
+| `deepseek/deepseek-v4-flash` | `DeepSeek V4.1 Flash 1017` | `DeepSeek V4 Flash` |
+| `deepseek/deepseek-v4-pro` | `DeepSeek V4 Pro 0813` | `DeepSeek V4 Pro` |
+| `deepseek/deepseek-v4-flash-vision-exp` | `DeepSeek V4.1 Flash 1017` | `DeepSeek V4 Flash Vision Exp` |
+| `moonshotai/kimi-k2.7-code-highspeed` | `Kimi K2.7 Code` | `Kimi K2.7 Code Highspeed` |
+
+修复后的优先级：已确认基础模型（统计分组身份）→ 完整 ID 自身规范名 → 渠道别名 →
+快照 canonical 关系；后三者只补充自身没有规范名的条目。快照 canonical 关系也不得
+覆盖自身规范名（`zhipuai/glm-5.2` 保持 `GLM-5.2`，不取 `GLM-5.2 0901`）。
+无自身规范名的条目仍可按确认别名取名（`doubao-seed-2-0-pro-260215` →
+`Seed 2.0 Pro`、`opencode/deepseek-v4-flash` → `DeepSeek V4 Flash 0731`）。
+裸 ID 路径与 11 个必验型号保持原规则，完整 ID 与裸 ID 各自取日期变体/base 名。
+展示名仍不进入 `Group.key`、下钻、原始请求 ID、CCS 覆盖或计价。
+
+红测试：新增 `full_id_own_catalog_name_beats_channel_alias`、
+`snapshot_canonical_claim_does_not_override_own_catalog_name`；修复前分别失败于
+上表四个 ID 与 `zhipuai/glm-5.2`，修复后连同既有 DN-C01..C11 全部通过。
+
+### 9.2 生成器保留同末段显式别名
+
+`scripts/update_model_display_catalog.py` 原先丢弃末段相同的显式
+`canonical_model_id`，导致 `relay/demo-v2 → publisher/demo-v2` 在重建后消失。
+去掉该过滤后只保留仍成立的三项约束：目标是规范清单成员、关系显式、目标不等于
+自身。新增 `scripts/test_update_model_display_catalog.py`（正向/倒序输入、真实同
+末段关系、同名异模、目标缺失与自指、排序与顺序无关），并纳入 contracts 组。
+
+用仓库脚本与公开目录重新生成 `model_display_catalog.json`（抓取日期
+2026-11-25）：规范模型 **640** 条、别名 **8679** 条、文件 985,296 字节。相对
+HEAD：规范模型 +6 / −4 / 0 改名；别名 +6964 / −21，另有 2 条改指向
+（`databricks/…gemini-3-1-flash-lite`、`fireworks-ai/…kimi-latest`）。最终目录中
+5584 条别名与来源同末段（本次新增的 6964 条里同末段者也是 5584 条），且**没有
+任何同末段来源同时是规范条目**，因此不改变完整 ID 自身规范名优先与裸 ID 唯一
+末段规则。生成器测试与真实目录离线回归
+（`302ai/MiniMax-M2` → `MiniMax-M2`，裸 `minimax-m2` 同名）均通过。
+
+### 9.3 v24 → v25 首屏回归
+
+`Dashboard.test.ts` 新增两个用例：挂起首个查询时，v24 快照的旧裸 ID 标签不得
+回到首屏，筛选偏好保持不变；放行后显示规范名并落盘 v25，且筛选偏好原样保存。
+首个查询失败时同样不回显旧标签、不写快照。把 `SNAPSHOT_VERSION` 临时改回 24 时
+两个用例均失败，恢复 25 后通过。验证层级为 Vitest 组件级 + 模拟 `invoke`；未读取
+或改写本机真实历史/缓存。真实 WebView2 验收已用受控 acceptance 构建在本机执行：
+`ui-identity` 22 项、`ui-refresh` 17 项检查全部通过（含
+`model_variants_merge_with_friendly_name`、`model_detail_keeps_raw_names`、
+`real_data_untouched`）。最新 HEAD 的 CI 结果推送后回填。
