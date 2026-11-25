@@ -205,4 +205,18 @@ HEAD：规范模型 +6 / −4 / 0 改名；别名 +6964 / −21，另有 2 条�
 或改写本机真实历史/缓存。真实 WebView2 验收已用受控 acceptance 构建在本机执行：
 `ui-identity` 22 项、`ui-refresh` 17 项检查全部通过（含
 `model_variants_merge_with_friendly_name`、`model_detail_keeps_raw_names`、
-`real_data_untouched`）。最新 HEAD 的 CI 结果推送后回填。
+`real_data_untouched`）。
+
+### 9.4 门禁结果（`c49e5a1`）
+
+- 本地完整提交钩子通过：两模式 workspace clippy `-D warnings`、默认 327 项与
+  acceptance 328 项 Rust 测试、前端 1225 项单测 / typecheck / format / build /
+  17 个浏览器契约、脚本 419 项与文档检查。
+- CI run [45585034323](https://github.com/ywltby/tokenscope/actions/runs/45585034323)：
+  `rust` 6m30s、`rust-acceptance` 6m19s、`contracts` 8m36s、`frontend` 8m47s、
+  `gate` 全部通过。
+- Install test run [45585034280](https://github.com/ywltby/tokenscope/actions/runs/45585034280)：
+  `install-test` 12m24s、`plan-upgrades` 11s、全部单跳升级用例（含 0.9.8
+  present/deleted）通过；`upgrade-chain` 按无连续升级链需求跳过。
+- Native UI E2E run [45585034318](https://github.com/ywltby/tokenscope/actions/runs/45585034318)：
+  `native-ui` 9m40s 通过。`gh pr checks 82` 在最新 HEAD 上退出码 0。
