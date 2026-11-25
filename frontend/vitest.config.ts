@@ -15,6 +15,12 @@ export default defineConfig({
     // 充足，多花的时间在 frontend 作业预算内。
     maxWorkers: 4,
     minWorkers: 1,
+    // 2026-11-25：挂起判定窗口 5s → 20s。`Settings.test.ts` 的 U06 用例内含
+    // 保存串行队列的 1.5s 等待，单独跑 1.5–2.0s；在 windows-latest（4 vCPU）
+    // 与本地"Rust 构建后立刻跑前端"的负载下实测超过默认 5s，报
+    // "Test timed out in 5000ms" 而非断言失败。用例集合与断言不变，只放宽
+    // 超时上限；真实死循环仍会在 20s 内失败。
+    testTimeout: 20_000,
     // 设计系统 Task 1：css: true 让 tokens.css 在测试中真实注入 DOM，
     // 断言语义 token 的两套主题与降级规则（默认空模块无法校验内容）。
     css: true,

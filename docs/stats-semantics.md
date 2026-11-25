@@ -724,11 +724,27 @@ v7 后新格式以强身份天然去重；弱记录（旧格式）沿用保守�
     原始 ID 和自身时间/分段计价，各 CCS 采用贡献按来源费用或适用费率逐条计价，
     之后才加总；显式零价与实际用量全部缺价必须分别显示。**不把展示键用于请求身份、
     计价或覆盖取证**（覆盖仍用原 `canonical_identity_key`，见 §5.1）。
-  - **升级零迁移**：`SNAPSHOT_VERSION` 22 → 23 → **24**（v0.9.8 名称解析分级
-    改变旧快照里的模型标签），旧界面快照忽略并由首次成功查询重建，筛选偏好与时区
-    照常保留。历史库（含 `model_identity` / `identity_revision`）、已导入 CCS、费率
-    快照与既有价格索引不因升级重写，无须重新导入。目录元数据在正常同步时作为可选
-    展示字段保留，不影响计价输入与价格索引版本。
+  - **独立展示名目录（v0.9.9）**：查询规则在 `model_display.rs`，名称数据与规则
+    分离，放在 `crates/tokenscope-core/data/model_display_catalog.json`（由
+    `scripts/update_model_display_catalog.py` 从公开 `models.json` 的规范名与
+    `api.json` 的显式 `canonical_model_id` 重建，文件内记录来源与抓取日期）。
+    查询**不依赖报价索引**：裸 ID 命中几十个有价有名的渠道时，只要公开规范目录
+    存在该末段的唯一规范身份即采用其模型级 name；不再由
+    `unique_modelsdev_identity` 在比较名称前拒绝。规范完整 ID、目录显式 canonical
+    关系与统计层已核实别名是身份证据；渠道数量、字典序、名称相似度与统一首字母
+    大写都不是证据。带命名空间且无身份关系的条目只取自身名称，不借同末段渠道。
+    同步时无 `cost` 的条目写入快照的 `names` 段（模型级 name + canonical 关系），
+    **绝不进入报价候选**；旧快照无该字段时按空处理，计价索引版本不变。
+    名称冲突、无规范身份或无公开名称时返回缺失并给出结构化原因
+    （`ambiguous_identity` / `conflicting_names` / `no_identity_evidence` /
+    `no_trusted_name`），聚合保留原始 ID。日期变体、Codex Spark / Flash / Pro 等
+    各有独立规范条目时各用自己的名字，不带后缀的型号不借日期版本名。
+  - **升级零迁移**：`SNAPSHOT_VERSION` 22 → 23 → 24 → **25**（v0.9.9 展示名改为
+    独立目录查询，v24 快照里的模型标签不再可信），旧界面快照忽略并由首次成功
+    查询重建，筛选偏好与时区照常保留。历史库（含 `model_identity` /
+    `identity_revision`）、已导入 CCS、费率快照与既有价格索引不因升级重写，
+    无须重新导入。目录元数据在正常同步时作为可选展示字段保留，不影响计价输入
+    与价格索引版本。
   - **旧模型下钻偏好的一次性迁移（v0.9.7）**：视图快照失效不会改写独立的
     `tokenscope-view-filters`。旧模型偏好缺少 `modelKeyVersion=1` 时，仅首次明细
     首页显式请求 `migrateLegacyModel`；后端使用同一冻结价格表和历史只读事务中、

@@ -1029,9 +1029,12 @@ mod tests {
         ];
         let agg = aggregate(&events, GroupBy::Model, &tz(), &Pricing::default()).unwrap();
         assert_eq!(agg.groups.len(), 3); // Hy3、Claude、合计
-        // MP04：Model 维度的 key 是等价身份键，label 是无可信名称时的原始代表写法。
+        // Model 维度的 key 是等价身份键；label 取公开规范目录中的发布方名称。
         assert_eq!(agg.groups[0].key, "claudesonnet45");
-        assert_eq!(agg.groups[0].label.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(
+            agg.groups[0].label.as_deref(),
+            Some("Claude Sonnet 4.5 (latest)")
+        );
         assert_eq!(agg.groups[0].tokens.input, 5);
         // Task 1：默认空价格表 → 所有模型 unknown（无编译期兜底）。
         assert!(agg.groups[0].unknown_pricing);

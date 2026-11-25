@@ -248,6 +248,58 @@ fn formal_display_name_shared_by_aggregate_chart_and_rollup() {
     );
     assert_eq!(meta.models, [OPUS], "CCS 日行保留原始模型 ID 详情");
     reconcile(group, &drill.rows);
+    drop(handle);
+
+    // v0.9.9（DN-C）：同一会话内接着验证裸 ID 命中几十个有价有名的渠道时，
+    // 聚合表、图表共用的标签与 CCS 日行仍一致；下钻与对账口径不变。
+    const ID48: &str = "claude-opus-4-8";
+    let f2 = Fixture::new();
+    f2.write_claude(&[claude(
+        "opus-48-native",
+        "2026-05-28T01:00:00Z",
+        ID48,
+        [1500, 250, 0, 0],
+    )]);
+    f2.seed_rollups(&[rollup("route", DAY, ID48, 2, [2000, 400, 0, 0], Some(0.5))]);
+    let entries: Vec<serde_json::Value> = (0..12)
+        .map(|i| {
+            json!({
+                "id": format!("relay-{i:02}/claude-opus-4-8"),
+                "name": "Claude Opus 4.8",
+                "input": 3.0, "output": 15.0, "cache_read": 1.0
+            })
+        })
+        .collect();
+    f2.write_modelsdev(json!(entries));
+    let handle2 = begin_query(&f2.opts).unwrap();
+    let report2 = query_summary(&handle2.query_id).unwrap();
+    let group2 = only_group(&report2);
+    assert_eq!(group2.key, "claudeopus48");
+    assert_eq!(group2.label.as_deref(), Some("Claude Opus 4.8"));
+    // 原生请求与 CCS 日行同日，按既有覆盖口径由日行取代，不重复计数。
+    assert_eq!(group2.requests, 2);
+    assert_eq!(group_tokens(group2), [2000, 400, 0, 0]);
+    close(group2.source_cost_usd.unwrap(), 0.5);
+    let drill2 = query_events(
+        &handle2.query_id,
+        &EventFilter {
+            model: Some(ID48.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(drill2.total, 2, "原始 ID 下钻仍命中原生请求与 CCS 日行");
+    let native2: Vec<_> = drill2.rows.iter().filter(|r| r.rollup.is_none()).collect();
+    let rollups2: Vec<_> = drill2.rows.iter().filter(|r| r.rollup.is_some()).collect();
+    assert_eq!(native2.len(), 1);
+    assert_eq!(native2[0].model, ID48, "请求明细保留原始 ID");
+    assert_eq!(rollups2.len(), 1);
+    assert_eq!(
+        rollups2[0].rollup.as_ref().unwrap().label,
+        "Claude Opus 4.8"
+    );
+    assert_eq!(rollups2[0].rollup.as_ref().unwrap().models, [ID48]);
+    reconcile(group2, &drill2.rows);
 }
 
 #[test]
@@ -589,7 +641,8 @@ fn gemma_catalog_base_model_is_explicit_and_independent_of_channel_count_or_orde
         let summary = query_summary(&handle.query_id).unwrap();
         let group = only_group(&summary);
         assert_eq!(group.key, key);
-        assert_eq!(group.label.as_deref(), Some("Gemma 4 26B A4B"));
+        // 展示名取自公开规范目录（models.json），不随合成快照里的渠道写法变化。
+        assert_eq!(group.label.as_deref(), Some("Gemma 4 26B A4B IT"));
         assert_eq!(group.requests, 3);
         let list = query_events(
             &handle.query_id,
@@ -934,9 +987,11 @@ fn malformed_optional_alias_keeps_prices_and_old_snapshot_compatibility() {
         let at = "2026-05-28T01:00:00Z".parse().unwrap();
         close(p.estimate(GEMMA, &t, at).unwrap().cost, 0.003);
         assert_eq!(p.estimate(GEMMA_FREE, &t, at).unwrap().cost, 0.0);
-        if version < 4 {
-            assert!(p.display_name_for(GEMMA).is_none(), "保留旧版名称降级");
-        }
+        assert_eq!(
+            p.display_name_for(GEMMA).as_deref(),
+            Some("Gemma 4 26B A4B IT"),
+            "展示名独立于快照版本与可选别名字段"
+        );
         let rate = p.lookup(GEMMA).unwrap().plan.base.cache_read;
         assert_eq!(
             rate,

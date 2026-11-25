@@ -153,8 +153,8 @@ fn test_e2e_summary_dimensions() {
         .collect();
     assert_eq!(
         labels,
-        ["claude-sonnet-4-5-20250929", "Hy3", ""],
-        "Hy3 使用已核实名；其他无可信名称时退回原始代表写法，合计无 label"
+        ["Claude Sonnet 4.5", "Hy3", ""],
+        "公开规范目录给出该日期模型的发布方名称；合计无 label"
     );
     assert_eq!(rm.groups[0].requests, 3, "同模型组含子代理请求");
     assert_eq!(rm.groups[0].tokens.input, 2099);

@@ -204,7 +204,7 @@ fn test_e2e_codex_json() {
         t.cost_usd
     );
 
-    // 模型维度：等价身份键序（末行为合计）；label 退回原始代表写法。
+    // 模型维度：等价身份键序（末行为合计）；label 取公开规范目录的发布方名称。
     let rm = codex_report(GroupBy::Model);
     let keys: Vec<&str> = rm.groups.iter().map(|g| g.key.as_str()).collect();
     assert_eq!(keys, ["gpt54", "gpt55", "gpt56sol", "合计"]);
@@ -213,7 +213,7 @@ fn test_e2e_codex_json() {
         .iter()
         .map(|g| g.label.as_deref().unwrap_or(""))
         .collect();
-    assert_eq!(labels, ["gpt-5.4", "gpt-5.5", "gpt-5.6-sol", ""]);
+    assert_eq!(labels, ["GPT-5.4", "GPT-5.5", "GPT-5.6 Sol", ""]);
     let sol = &rm.groups[2];
     assert_eq!(sol.requests, 3);
     assert_eq!(sol.tokens.input, 761);

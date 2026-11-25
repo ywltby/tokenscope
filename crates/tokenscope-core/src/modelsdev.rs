@@ -188,6 +188,20 @@ pub struct SnapshotEntry {
     pub segments: Vec<SnapshotSegment>,
 }
 
+/// 无价条目的名称与身份关系：保留展示名证据，但不进入报价候选。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotNameEntry {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_canonical_id"
+    )]
+    pub canonical_model_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     /// 快照格式版本：v2 起分项可空（缺键=未知）；v3 起带上下文分段
@@ -200,6 +214,9 @@ pub struct Snapshot {
     pub v: u8,
     pub synced_at: String,
     pub entries: Vec<SnapshotEntry>,
+    /// 无 cost 条目的模型级名称；旧快照缺省为空，不影响价格与索引签名。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<SnapshotNameEntry>,
 }
 
 fn default_snapshot_v1() -> u8 {
@@ -257,11 +274,19 @@ pub(crate) fn sync_with(
     let body: BTreeMap<String, ApiEntry> = fetch()?;
 
     let mut entries: Vec<SnapshotEntry> = Vec::new();
+    let mut names: Vec<SnapshotNameEntry> = Vec::new();
     let mut report_warnings: Vec<crate::sync_diag::SyncWarning> = Vec::new();
     for (provider, entry) in body {
         for (model_id, m) in entry.models {
             let Some(cost) = m.cost else {
-                continue; // 无 cost（免费/非 LLM/占位）不入快照
+                // 无 cost（免费/非 LLM/占位）不进报价候选，但模型级名称与
+                // canonical 关系仍是展示证据，单独保留；不写入价格字段。
+                names.push(SnapshotNameEntry {
+                    id: format!("{provider}/{model_id}"),
+                    name: m.name,
+                    canonical_model_id: m.canonical_model_id,
+                });
+                continue;
             };
             let (segments, warnings) = convert_tiers(&cost.tiers, cost.context_over_200k.as_ref());
             // 只收集不写日志：调用方经 sync_diag::log_sync_warnings 统一记录
@@ -296,6 +321,8 @@ pub(crate) fn sync_with(
         // 原始键中，估算按请求条件取最高费用），只去重完全相同的 id。
         a.id == b.id
     });
+    names.sort_by(|a, b| a.id.cmp(&b.id));
+    names.dedup_by(|a, b| a.id == b.id);
 
     let synced_at = jiff::Zoned::now().to_string();
     let count = entries.len() as u64;
@@ -303,6 +330,7 @@ pub(crate) fn sync_with(
         v: 4,
         synced_at: synced_at.clone(),
         entries,
+        names,
     };
     if let Some(dir) = snapshot_path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
@@ -471,6 +499,9 @@ pub(crate) fn parse_snapshot_text(text: &str) -> Result<Snapshot> {
     // 模型名）——价格继续可用，但来源不明的 name 不得作为聚合展示名。
     if snapshot.v < 4 {
         for e in &mut snapshot.entries {
+            e.name = None;
+        }
+        for e in &mut snapshot.names {
             e.name = None;
         }
     }
@@ -706,6 +737,7 @@ mod tests {
         let snapshot = Snapshot {
             v: 2,
             synced_at: "2026-10-04T00:00:00+08:00".into(),
+            names: Vec::new(),
             entries: vec![SnapshotEntry {
                 id: "volcengine/doubao-seed-2-0-pro-260215".into(),
                 name: Some("Doubao Seed 2.0 Pro".into()),
