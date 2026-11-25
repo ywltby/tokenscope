@@ -2,6 +2,20 @@
   "schema_version": 1,
   "generated": [
     {
+      "path": "crates/tokenscope-core/data/model_display_catalog.json",
+      "kind": "file",
+      "consumers": [
+        {
+          "package": "tokenscope",
+          "mode": "acceptance"
+        },
+        {
+          "package": "tokenscope",
+          "mode": "default"
+        }
+      ]
+    },
+    {
       "path": "crates/tokenscope-core/tests/fixtures/cache/schema-v3.sql",
       "kind": "file",
       "consumers": [

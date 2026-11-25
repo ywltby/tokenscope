@@ -93,6 +93,12 @@ impl ModelStatsGrouping {
             .map(str::to_owned)
     }
 
+    pub(super) fn aliases_to(&self, key: &str) -> impl Iterator<Item = &str> {
+        self.aliases
+            .iter()
+            .filter_map(move |(alias, target)| (target == key).then_some(alias.as_str()))
+    }
+
     pub(super) fn retained_bytes(&self) -> Result<usize, String> {
         let mut n = ByteCount::default();
         n.add(capacity_bytes(

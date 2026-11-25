@@ -152,12 +152,13 @@ fn model_identity_groups_aliases_across_agents() {
     assert_eq!(g.tokens.input, 30);
 
     // 无可信名称时退回原始代表写法（字典序最小），不展示压缩键。
+    // 用未公开收录的虚构 ID，避免公开规范目录改变本用例的边界。
     let dir2 = tmp("groups-no-name");
-    let claude2 = claude_dir(&dir2, &["claude-opus-5.5", "claude-opus-5-5"], 10);
+    let claude2 = claude_dir(&dir2, &["unnamed-alpha-1", "unnamed-alpha.1"], 10);
     let r2 = summary(&opts(&dir2, &claude2, None, GroupBy::Model)).unwrap();
     assert_eq!(r2.groups.len(), 2);
-    assert_eq!(r2.groups[0].key, "claudeopus55");
-    assert_eq!(r2.groups[0].label.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(r2.groups[0].key, "unnamedalpha1");
+    assert_eq!(r2.groups[0].label.as_deref(), Some("unnamed-alpha-1"));
 }
 
 #[test]
@@ -505,27 +506,30 @@ fn model_display_name_official_priority_edge_cases() {
         "md.json",
         r#"{
             "302ai": {"models": {
-                "claude-opus-4-7": {
-                    "name": "Claude 4.7 Opus",
-                    "canonical_model_id": "anthropic/claude-opus-4-7",
+                "demo-official-fallback": {
+                    "name": "Confirmed Channel Name",
+                    "canonical_model_id": "fictional/demo-official-fallback",
                     "cost": {"input": 3, "output": 15}
                 }
             }},
             "anthropic": {"models": {
-                "claude-opus-4-7": {"cost": {"input": 3, "output": 15}}
+                "demo-official-fallback": {"cost": {"input": 3, "output": 15}}
             }}
         }"#,
     );
     let (p2, _) = Pricing::load(None, Some(&snap2), None);
     assert_eq!(
-        p2.display_name_for("claude-opus-4-7").as_deref(),
-        Some("Claude 4.7 Opus"),
+        p2.display_name_for("demo-official-fallback").as_deref(),
+        Some("Confirmed Channel Name"),
         "官方条目无可用正式名时用已确认渠道的正式名兜底"
     );
 
-    // 无目录 → 裸 ID、确认别名都返回 None（保留原始 ID）。
+    // 无快照 → 公开规范目录中的 ID 离线仍解析；未收录 ID 保留原文。
     let (p3, _) = Pricing::load(None, None, None);
-    assert_eq!(p3.display_name_for("claude-opus-4-7"), None);
+    assert_eq!(
+        p3.display_name_for("claude-opus-4-7").as_deref(),
+        Some("Claude Opus 4.7")
+    );
     assert_eq!(p3.display_name_for("gpt-6-astra-cc-format"), None);
 }
 
@@ -602,19 +606,18 @@ fn model_display_name_requires_per_candidate_identity() {
         "md.json",
         r#"{
             "aaa": {"models": {
-                "claude-opus-4-7": {
+                "demo-identity-1": {
                     "name": "Independent Model",
-                    "canonical_model_id": "independent/claude-opus-4-7",
                     "cost": {"input": 3, "output": 15}
                 }
             }},
-            "anthropic": {"models": {
-                "claude-opus-4-7": {"name": "claude-opus-4-7", "cost": {"input": 3, "output": 15}}
+            "publisher": {"models": {
+                "demo-identity-1": {"name": "demo-identity-1", "cost": {"input": 3, "output": 15}}
             }},
             "known-relay": {"models": {
-                "claude-opus-4-7": {
-                    "name": "Claude Opus 4.7",
-                    "canonical_model_id": "anthropic/claude-opus-4-7",
+                "demo-identity-1": {
+                    "name": "Verified Identity Name",
+                    "canonical_model_id": "publisher/demo-identity-1",
                     "cost": {"input": 3, "output": 15}
                 }
             }}
@@ -622,13 +625,13 @@ fn model_display_name_requires_per_candidate_identity() {
     );
     let (p, _w) = Pricing::load(None, Some(&snap), None);
     assert_eq!(
-        p.display_name_for("claude-opus-4-7").as_deref(),
-        Some("Claude Opus 4.7"),
+        p.display_name_for("demo-identity-1").as_deref(),
+        Some("Verified Identity Name"),
         "明确指向其它模型的同末段渠道不得参与选名"
     );
     assert_eq!(
-        p.display_name_for("anthropic/claude-opus-4-7").as_deref(),
-        Some("Claude Opus 4.7"),
+        p.display_name_for("publisher/demo-identity-1").as_deref(),
+        Some("Verified Identity Name"),
         "带命名空间的官方查询同样只认已确认身份的渠道"
     );
 
@@ -639,15 +642,15 @@ fn model_display_name_requires_per_candidate_identity() {
         "md.json",
         r#"{
             "aab": {"models": {
-                "claude-opus-4-7": {"name": "Unverified Model", "cost": {"input": 3, "output": 15}}
+                "demo-identity-1": {"name": "Unverified Model", "cost": {"input": 3, "output": 15}}
             }},
-            "anthropic": {"models": {
-                "claude-opus-4-7": {"name": "claude-opus-4-7", "cost": {"input": 3, "output": 15}}
+            "publisher": {"models": {
+                "demo-identity-1": {"name": "demo-identity-1", "cost": {"input": 3, "output": 15}}
             }},
             "known-relay": {"models": {
-                "claude-opus-4-7": {
-                    "name": "Claude Opus 4.7",
-                    "canonical_model_id": "anthropic/claude-opus-4-7",
+                "demo-identity-1": {
+                    "name": "Verified Identity Name",
+                    "canonical_model_id": "publisher/demo-identity-1",
                     "cost": {"input": 3, "output": 15}
                 }
             }}
@@ -655,8 +658,8 @@ fn model_display_name_requires_per_candidate_identity() {
     );
     let (p2, _w2) = Pricing::load(None, Some(&snap2), None);
     assert_eq!(
-        p2.display_name_for("claude-opus-4-7").as_deref(),
-        Some("Claude Opus 4.7"),
+        p2.display_name_for("demo-identity-1").as_deref(),
+        Some("Verified Identity Name"),
         "无身份依据的渠道即使字典序更靠前也不参与选名"
     );
 
@@ -667,18 +670,17 @@ fn model_display_name_requires_per_candidate_identity() {
         "md.json",
         r#"{
             "aaa": {"models": {
-                "claude-opus-4-7": {
+                "demo-identity-1": {
                     "name": "Independent Model",
-                    "canonical_model_id": "independent/claude-opus-4-7",
                     "cost": {"input": 3, "output": 15}
                 }
             }},
-            "anthropic": {"models": {
-                "claude-opus-4-7": {"name": "claude-opus-4-7", "cost": {"input": 3, "output": 15}}
+            "publisher": {"models": {
+                "demo-identity-1": {"name": "demo-identity-1", "cost": {"input": 3, "output": 15}}
             }},
             "known-relay": {"models": {
-                "claude-opus-4-7": {
-                    "canonical_model_id": "anthropic/claude-opus-4-7",
+                "demo-identity-1": {
+                    "canonical_model_id": "publisher/demo-identity-1",
                     "cost": {"input": 3, "output": 15}
                 }
             }}
@@ -686,8 +688,8 @@ fn model_display_name_requires_per_candidate_identity() {
     );
     let (p3, _w3) = Pricing::load(None, Some(&snap3), None);
     assert_eq!(
-        p3.display_name_for("claude-opus-4-7").as_deref(),
-        Some("claude-opus-4-7"),
+        p3.display_name_for("demo-identity-1").as_deref(),
+        Some("demo-identity-1"),
         "无合格正式名时回退该组原始 ID，不借其它模型的名称"
     );
 
@@ -698,18 +700,17 @@ fn model_display_name_requires_per_candidate_identity() {
         "md.json",
         r#"{
             "aaa": {"models": {
-                "claude-opus-4-7": {
+                "demo-identity-1": {
                     "name": "Independent Model",
-                    "canonical_model_id": "independent/claude-opus-4-7",
                     "cost": {"input": 3, "output": 15}
                 }
             }},
-            "anthropic": {"models": {
-                "claude-opus-4-7": {"cost": {"input": 3, "output": 15}}
+            "publisher": {"models": {
+                "demo-identity-1": {"cost": {"input": 3, "output": 15}}
             }},
             "known-relay": {"models": {
-                "claude-opus-4-7": {
-                    "canonical_model_id": "anthropic/claude-opus-4-7",
+                "demo-identity-1": {
+                    "canonical_model_id": "publisher/demo-identity-1",
                     "cost": {"input": 3, "output": 15}
                 }
             }}
@@ -717,7 +718,7 @@ fn model_display_name_requires_per_candidate_identity() {
     );
     let (p4, _w4) = Pricing::load(None, Some(&snap4), None);
     assert_eq!(
-        p4.display_name_for("claude-opus-4-7"),
+        p4.display_name_for("demo-identity-1"),
         None,
         "整组没有合格名称时返回缺失，由聚合保留原始 ID"
     );
@@ -735,12 +736,12 @@ fn blank_model_name_is_unavailable() {
     assert_eq!(p.display_name_for("opus55"), None, "空白名称视为缺失");
 
     // 聚合标签必须退回原始代表写法，不能显示空白。
-    let claude = claude_dir(&dir, &["claude-opus-5.5"], 10);
+    let claude = claude_dir(&dir, &["opus-5.5"], 10);
     let r = summary(&opts(&dir, &claude, Some(&md), GroupBy::Model)).unwrap();
-    assert_eq!(r.groups[0].key, "claudeopus55");
+    assert_eq!(r.groups[0].key, "opus55");
     assert_eq!(
         r.groups[0].label.as_deref(),
-        Some("claude-opus-5.5"),
+        Some("opus-5.5"),
         "空白名称不得成为展示名"
     );
 }

@@ -8,6 +8,7 @@ pub mod history;
 pub mod import;
 pub mod logging;
 pub mod model;
+pub mod model_display;
 pub mod model_identity;
 pub mod modelsdev;
 pub mod openrouter;

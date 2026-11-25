@@ -178,8 +178,13 @@ fn test_golden_summary_events_parity() {
         .collect();
     assert_eq!(
         labels,
-        ["claude-sonnet-4-5", "gpt-5.6-sol", "unknown-model-x", ""],
-        "展示名退回原始代表写法（合计行无 label）"
+        [
+            "Claude Sonnet 4.5 (latest)",
+            "GPT-5.6 Sol",
+            "unknown-model-x",
+            ""
+        ],
+        "公开规范目录给出前两个模型的发布方名称；未收录 ID 保留原文（合计无 label）"
     );
     let p = summary(&SummaryOptions {
         workbuddy_enabled: Some(false),

@@ -452,6 +452,33 @@ export function webviewSmartScreenCacheExempted(root, code, filePath) {
 }
 
 /**
+ * Runner 45651583301：WebView2 Shared Dictionary 的 SimpleCache 原子改名
+ * （temp-index → the-real-index）在 readdir 返回后、lstat 之前消失。
+ * 只登记本次实际取证的完整相对路径，不扩为其他目录、Profile 或真实索引文件。
+ * 非 ENOENT 不豁免；存在时仍照常核对符号链接、junction 与硬链接。
+ */
+export function webviewSharedDictionaryTempIndexExempted(root, code, filePath) {
+  if (code !== "ENOENT") return false;
+  const rootKey = comparePath(root);
+  if (!rootKey) return false;
+  return (
+    comparePath(filePath) ===
+    comparePath(
+      path.join(
+        root,
+        "webview",
+        "EBWebView",
+        "Default",
+        "Shared Dictionary",
+        "cache",
+        "index-dir",
+        "temp-index",
+      ),
+    )
+  );
+}
+
+/**
  * 走查两阶段共用的瞬时产物豁免：受控历史库 sidecar 或应用原子写临时文件。
  */
 export function transientArtifactExempted(root, code, filePath) {
@@ -459,7 +486,8 @@ export function transientArtifactExempted(root, code, filePath) {
     transientDbArtifactExempted(root, code, filePath) ||
     atomicWriteTmpExempted(root, code, filePath) ||
     webviewTransientTmpExempted(root, code, filePath) ||
-    webviewSmartScreenCacheExempted(root, code, filePath)
+    webviewSmartScreenCacheExempted(root, code, filePath) ||
+    webviewSharedDictionaryTempIndexExempted(root, code, filePath)
   );
 }
 

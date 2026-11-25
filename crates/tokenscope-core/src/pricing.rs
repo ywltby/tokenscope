@@ -21,10 +21,13 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::model::TokenCounts;
+use crate::model_display;
 use crate::openrouter;
 
 mod model_stats;
 mod rollup;
+
+pub use crate::model_display::{DisplayNameReason, DisplayNameResolution};
 
 const TIER_EXTERNAL: u8 = 0;
 const TIER_MODELSDEV: u8 = 1;
@@ -42,20 +45,6 @@ const TIER_OPENROUTER: u8 = 2;
 /// 规范写法映射到自身，故 `canonical` 幂等。新增条目必须先核实两侧确为同一
 /// 模型版本——宁可少合并，不可误合并。
 const CONFIRMED_MODEL_ALIASES: &[(&str, &str)] = &[("claudefable52", "anthropic/claudefable52")];
-
-/// v0.9.8 补修二：**仅用于展示名**的已核实「裸 ID → 基础完整 ID」映射。
-///
-/// 本机 models.dev 快照（v4）的条目没有 `canonical_model_id` 关系，但官方条目
-/// 已逐条核实：`anthropic/claude-sonnet-4-6` 的模型级 name 是 `Claude Sonnet 4.6`，
-/// `openai/gpt-5.4` 的模型级 name 是 `GPT-5.4`。这两个裸 ID 在目录里缺少可
-/// 确认的基础模型关系，若只按自身结构身份解析会被同末段的不同渠道（302ai 的
-/// ID 抄写、aimlapi 的词序变体）干扰。此映射只决定展示名的候选集合，
-/// **不进入** `model_stats_key`、`canonical_identity_key`、计价、下钻或 CCS 覆盖，
-/// 因此 `Group.key` 与历史库均不受影响。新增条目必须先核对官方模型级名称。
-const DISPLAY_NAME_ALIASES: &[(&str, &str)] = &[
-    ("claudesonnet46", "anthropic/claudesonnet46"),
-    ("gpt54", "openai/gpt54"),
-];
 
 /// 归一化模型标识（键与查询共用同一函数，MP01）：按 `ModelIdentity` 解析结构后
 /// 做等价化——ASCII 转小写、删除 `-` / `.` / `_`，保留 `/` 渠道结构与 `: 变体`
@@ -83,83 +72,6 @@ fn entry_display_order(a: &Entry, b: &Entry) -> bool {
         )
     };
     key(a) < key(b)
-}
-
-/// 名称是否可用：非 None 且去掉首尾空白后非空——空白名称视为缺失
-/// （否则聚合标签、图表名称会显示成空白）。
-fn usable_name(name: &Option<String>) -> bool {
-    name.as_deref().is_some_and(|n| !n.trim().is_empty())
-}
-
-/// v0.9.8（DN）：判断条目 name 是否为「原始 ID 抄写」——渠道把模型 ID 原样
-/// 填进了 name 字段（本机 `302ai/claude-opus-4-7` 的 name 就是 `claude-opus-4-7`）。
-/// 判据同时满足三点才成立：与条目 ID 的末段（或完整 ID）原样一致、全小写、
-/// 含 ID 风格分隔符（`-`/`_`/`.`）。这样 `o3`、`hy3` 这类合法短名与
-/// `Claude Opus 4.7`、`GPT-5.4` 这类带大写/空格的正式名都不被误判。
-fn is_id_copy_name(name: &str, display: &str) -> bool {
-    let name = name.trim();
-    let leaf = display.rsplit('/').next().unwrap_or(display);
-    if name != leaf && name != display {
-        return false;
-    }
-    name.chars().all(|c| !c.is_uppercase())
-        && (name.contains('-') || name.contains('_') || name.contains('.'))
-}
-
-/// 展示名质量：2 = 正式模型名；1 = ID 抄写（兜底）；0 = 不可用。
-/// 正式名优先于抄写名，避免字典序靠前的代理渠道（302ai）盖掉同组已有
-/// 的正式名（Claude Opus 4.7 / GPT-5.4）。
-fn display_name_quality(e: &Entry) -> u8 {
-    if !usable_name(&e.name) {
-        return 0;
-    }
-    let name = e.name.as_deref().unwrap_or("");
-    if is_id_copy_name(name, &e.display) {
-        1
-    } else {
-        2
-    }
-}
-
-/// 同末段里 models.dev 条目若只有一个完整身份，返回该身份键供裸 ID 采用；
-/// 多个不同身份（同末段异模）或无条目时返回 None——形态相近、名称包含或
-/// 同末段本身都不能证明身份。
-fn unique_modelsdev_identity(entries: &[Entry]) -> Option<String> {
-    let mut ids: Vec<String> = entries
-        .iter()
-        .filter(|e| e.tier == TIER_MODELSDEV)
-        .map(|e| crate::model_identity::ModelIdentity::parse(&e.display).identity_key())
-        .collect();
-    ids.sort();
-    ids.dedup();
-    (ids.len() == 1).then(|| ids[0].clone())
-}
-
-/// 从候选池里取指定名称质量的条目（保持稳定序由 [`pick_display_name_entry`] 负责）。
-fn entries_with_quality<'a>(pool: &[&'a Entry], quality: u8) -> Vec<&'a Entry> {
-    pool.iter()
-        .copied()
-        .filter(|e| display_name_quality(e) == quality)
-        .collect()
-}
-
-/// 在候选中按「名称质量优先、同级稳定字典序」择一。
-fn pick_display_name_entry<'a>(candidates: &[&'a Entry]) -> Option<&'a Entry> {
-    let mut best: Option<&Entry> = None;
-    for &e in candidates {
-        let better = match best {
-            None => true,
-            Some(b) => match display_name_quality(e).cmp(&display_name_quality(b)) {
-                std::cmp::Ordering::Greater => true,
-                std::cmp::Ordering::Equal => entry_display_order(e, b),
-                std::cmp::Ordering::Less => false,
-            },
-        };
-        if better {
-            best = Some(e);
-        }
-    }
-    best
 }
 
 /// 归一后基名为空（`provider/-._`、`-._`）→ 不是有效价格键：拒绝入库并由调用方
@@ -2401,6 +2313,8 @@ fn read_sources(
 pub struct Pricing {
     by_prefix: PrefixIndex,
     model_stats: model_stats::ModelStatsGrouping,
+    /// 展示名独立目录：不随报价索引恢复，冻结自来源快照或内嵌公开规范名。
+    display_names: model_display::NameCatalog,
 }
 
 impl Default for Pricing {
@@ -2416,7 +2330,14 @@ impl Pricing {
         Self {
             by_prefix: PrefixIndex::new(),
             model_stats: model_stats::ModelStatsGrouping::default(),
+            display_names: model_display::NameCatalog::offline(),
         }
+    }
+
+    /// 测试用：使用合成的随包展示名目录 JSON 验证离线与快照解析。
+    pub fn with_display_catalog_json_for_tests(mut self, json: &str) -> Self {
+        self.display_names = self.display_names.with_embedded_json_for_tests(json);
+        self
     }
 
     fn add_entry(&mut self, e: Entry) {
@@ -2456,6 +2377,7 @@ impl Pricing {
             }
         }
         n.add(self.model_stats.retained_bytes()?)?;
+        n.add(self.display_names.retained_bytes()?)?;
         Ok(n.get())
     }
 
@@ -2563,6 +2485,8 @@ impl Pricing {
             match crate::modelsdev::parse_snapshot_text(text) {
                 Ok(snapshot) => {
                     pricing.model_stats = model_stats::ModelStatsGrouping::from_snapshot(&snapshot);
+                    pricing.display_names =
+                        model_display::NameCatalog::from_snapshot(Some(&snapshot));
                     raw_modelsdev_count = snapshot.entries.len();
                     modelsdev_synced_at = Some(snapshot.synced_at.clone());
                     for e in snapshot.entries {
@@ -3228,94 +3152,51 @@ impl Pricing {
         self.count_tier(TIER_EXTERNAL)
     }
 
-    /// MP03（审查修订）：按**完整等价 ID**查询可信展示名——只认 models.dev
-    /// 的模型级 `name`（OpenRouter 渠道别名、外置条目名称不作为模型展示名），
-    /// 空白名称视为缺失。
-    ///
-    /// v0.9.8 补修二：**先确定身份，再比较名称质量**。
-    /// 1. 身份：命名层已核实映射（[`DISPLAY_NAME_ALIASES`]）或统计层固定别名 /
-    ///    目录 `base_model` 关系给出的基础完整 ID 优先；带命名空间的查询用自身
-    ///    完整身份；裸 ID 只有在同末段仅有一个 models.dev 身份时才可确认，否则
-    ///    返回 None（保留原始 ID）。名称的近似、相互包含与末段相同都**不**参与
-    ///    身份判定。
-    /// 2. 候选（v0.9.8 补修三）：**同末段只是检索键**，每条候选都要单独核对
-    ///    身份——自身完整 ID 等于目标，或目录关系/已核实映射明确指向同一基础
-    ///    模型，才可参与选名。缺少关系、明确指向其它模型或关系冲突（映射被
-    ///    丢弃）的渠道一律排除，不因字典序靠前而胜出。
-    /// 3. 取词：官方完整 ID 的正式名 → 已确认渠道的正式名 → 原始 ID 抄写兜底；
-    ///    同级按稳定的 `(display, name)` 字典序。官方条目只有 ID 抄写或空白名时
-    ///    继续使用渠道正式名。
-    ///
-    /// 与价格赢家选择独立：不随条目/事件顺序变化；仅前缀命中的旧版本不得冒充
-    /// 本模型；不同 ID 即使 name 相同也不合并。未命中返回 None——聚合层退回该组
-    /// 原始模型名的稳定代表写法。
-    pub fn display_name_for(&self, model: &str) -> Option<String> {
-        use crate::model_identity::ModelIdentity;
-        let id = ModelIdentity::parse(model);
-        if id.is_empty_key() {
-            return None;
-        }
-        let group = self.by_prefix.get(id.leaf_key().as_bytes())?;
-        let usable: Vec<&Entry> = group
-            .iter()
-            .filter(|e| e.tier == TIER_MODELSDEV && display_name_quality(e) > 0)
-            .collect();
-
-        // 1. 先定身份；名称不参与这一步。
-        let structural = id.identity_key();
-        let mapped = DISPLAY_NAME_ALIASES
-            .iter()
-            .find(|(alias, base)| structural == *alias || structural == *base)
-            .map(|(_, base)| (*base).to_string())
-            .or_else(|| self.model_stats.confirmed_base_for(model));
-        let target = match mapped {
-            Some(base) => base,
-            // 带命名空间的自身身份：目标就是该 ID 自己。
-            None if id.namespace().is_some() => structural.clone(),
-            // 裸 ID 无确认依据：仅同末段唯一 models.dev 身份可确认。
-            None => unique_modelsdev_identity(group)?,
-        };
-        if usable.is_empty() {
-            return None;
-        }
-
-        // 2. 候选：逐个核对身份，不从同末段直接凑池。
-        let qualified: Vec<&Entry> = usable
-            .iter()
-            .copied()
-            .filter(|e| self.candidate_matches_base(&e.display, &target))
-            .collect();
-        let official: Vec<&Entry> = qualified
-            .iter()
-            .copied()
-            .filter(|e| ModelIdentity::parse(&e.display).identity_key() == target)
-            .collect();
-        // 渠道池已逐条核对，官方与渠道的名称质量次序仍保留。
-        let channels = qualified;
-
-        // 3. 官方正式名 → 已确认渠道正式名 → 原始 ID 抄写兜底。
-        for pool in [
-            entries_with_quality(&official, 2),
-            entries_with_quality(&channels, 2),
-            entries_with_quality(&official, 1),
-            entries_with_quality(&channels, 1),
-        ] {
-            if let Some(e) = pick_display_name_entry(&pool) {
-                return e.name.clone();
-            }
-        }
-        None
+    /// 展示名查询结果（含未命中原因）供审计与诊断使用；不参与计价或分组。
+    /// 名称规则与名称数据见 [`crate::model_display`]。
+    pub fn display_name_resolution_for(&self, model: &str) -> DisplayNameResolution {
+        let base = self.model_stats.confirmed_base_for(model);
+        self.display_names.resolve(model, base.as_deref())
     }
 
-    /// 候选身份核对（v0.9.8 补修三）：同末段只是检索键，**不是**身份证据。
-    /// 只有两种情形算同一基础模型——条目的**自身完整 ID 等于目标**，或目录
-    /// `base_model` 关系/已核实映射**明确指向目标**。缺少关系、明确指向其它
-    /// 模型、以及关系冲突（统计层已丢弃该映射）的条目都不参与选名。
-    fn candidate_matches_base(&self, display: &str, target: &str) -> bool {
-        if crate::model_identity::ModelIdentity::parse(display).identity_key() == target {
-            return true;
+    /// 模型 ID 自身的随包规范名；不采用统计分组、显式别名或快照 canonical 映射。
+    pub fn own_catalog_name_for(&self, model: &str) -> Option<String> {
+        self.display_names.own_catalog_name(model)
+    }
+
+    /// 统计组内已确认别名自身的规范名；仅使用显式映射，不把同末段当身份证据。
+    pub fn own_catalog_name_for_group(&self, model: &str) -> Option<String> {
+        let key = self.model_stats.key_for(model);
+        if self.display_names.own_catalog_name(&key).is_some() {
+            return None;
         }
-        self.model_stats.confirmed_base_for(display).as_deref() == Some(target)
+        self.model_stats
+            .aliases_to(&key)
+            .filter_map(|alias| {
+                self.display_names
+                    .own_catalog_name(alias)
+                    .map(|name| (alias, name))
+            })
+            .min_by(|(a, _), (b, _)| a.cmp(b))
+            .map(|(_, name)| name)
+    }
+
+    /// 按完整等价 ID 返回可信展示名；未命中返回 None，聚合保留原始 ID。
+    ///
+    /// 查询独立于报价索引：规范名称来自随程序发布的 `models.json`，快照中的
+    /// 模型级名称（含无价条目）作为补充；身份由规范完整 ID、目录显式 canonical
+    /// 关系或统计层已核实别名确认，名称相似、渠道数量与字典序都不参与。
+    /// 真实冲突或确无依据时返回 None，原因见 [`Self::display_name_resolution_for`]。
+    pub fn display_name_for(&self, model: &str) -> Option<String> {
+        let resolution = self.display_name_resolution_for(model);
+        if resolution.name.is_none() {
+            log::debug!(
+                target: "tokenscope::display_name",
+                "保留原始模型 ID model={model} reason={reason}",
+                reason = resolution.reason.as_str(),
+            );
+        }
+        resolution.name
     }
 
     /// 模型统计分组键：聚合、图表数据、模型下钻、CCS 日行展示与下钻指纹共用。
@@ -3537,6 +3418,8 @@ impl Pricing {
                 {
                     // 旧价格索引无须升级：用同一签名下冻结的目录元数据恢复展示键。
                     pricing.model_stats = model_stats::ModelStatsGrouping::from_snapshot(&snapshot);
+                    pricing.display_names =
+                        model_display::NameCatalog::from_snapshot(Some(&snapshot));
                 }
                 let arc = std::sync::Arc::new(pricing);
                 *guard = Some((sig.clone(), arc.clone(), index.warnings.clone()));
@@ -4396,6 +4279,7 @@ mod tests {
         let snapshot = Snapshot {
             v: 3,
             synced_at: "t".into(),
+            names: Vec::new(),
             entries: vec![
                 SnapshotEntry {
                     id: "prov/tiered".into(),
@@ -4543,6 +4427,7 @@ mod tests {
         let snapshot = Snapshot {
             v: 2,
             synced_at: "t".into(),
+            names: Vec::new(),
             entries: vec![
                 // 缺 cache_write/cache_read 键（serde None）
                 SnapshotEntry {
@@ -4664,6 +4549,7 @@ mod tests {
         let snapshot = Snapshot {
             v: 2,
             synced_at: "t".into(),
+            names: Vec::new(),
             entries: vec![SnapshotEntry {
                 id: "prov/partial".into(),
                 name: None,
@@ -4805,6 +4691,7 @@ mod tests {
         let md_snap = MdSnap {
             v: 2,
             synced_at: "t".into(),
+            names: Vec::new(),
             entries: vec![MdEntry {
                 canonical_model_id: None,
                 id: "prov/legacy".into(),

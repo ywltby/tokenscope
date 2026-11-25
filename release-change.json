@@ -1,5 +1,5 @@
 {
   "schema_version": 1,
   "kind": "patch",
-  "summary": "展示名质量分级：正式模型名优先于渠道 ID 抄写，聚合表/图表/CCS 日行共用，视图快照 v24 自动重建"
+  "summary": "修复裸模型 ID 的展示名解析并建立独立名称目录"
 }

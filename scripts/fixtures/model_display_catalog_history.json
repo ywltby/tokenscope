@@ -1,0 +1,198 @@
+{
+  "source": {
+    "note": "仅保留有上游提交证据的历史身份；当前 models.json/api.json 存在对应条目时一律以现行目录为准，本层仅补已消失条目；标为 upstream_assumed 的弱证据仅留档，不用于生成可用别名。",
+    "models": "https://github.com/anomalyco/models.dev/commit/491502c0bec9",
+    "aliases": [
+      "https://github.com/anomalyco/models.dev/commit/6ed2ecb821af",
+      "https://github.com/anomalyco/models.dev/commit/e944b38c326f",
+      "https://github.com/anomalyco/models.dev/commit/45aaa380ff10",
+      "https://github.com/anomalyco/models.dev/commit/2057aa9e7597",
+      "https://github.com/anomalyco/models.dev/commit/056a5f0b82eb",
+      "https://github.com/anomalyco/models.dev/commit/c36930455d7a",
+      "https://github.com/anomalyco/models.dev/commit/32b3ad9c0262",
+      "https://github.com/anomalyco/models.dev/commit/327c119da0b90bf266504857e46dc02a393adb1c",
+      "https://github.com/anomalyco/models.dev/commit/9e376549545a7e7d63a67761c1c093915dfd344d"
+    ]
+  },
+  "models": [
+    {
+      "id": "xiaomi/mimo-v2-tts",
+      "name": "MiMo-V2-TTS",
+      "reason": "上游标记 v2_only 后从 models.json 排除；规范 ID 与名称仍保留在上游源码。"
+    },
+    {
+      "id": "xiaomi/mimo-v2.5-tts",
+      "name": "MiMo-V2.5-TTS",
+      "reason": "上游标记 v2_only 后从 models.json 排除；规范 ID 与名称仍保留在上游源码。"
+    },
+    {
+      "id": "xiaomi/mimo-v2.5-tts-voiceclone",
+      "name": "MiMo-V2.5-TTS-VoiceClone",
+      "reason": "上游标记 v2_only 后从 models.json 排除；规范 ID 与名称仍保留在上游源码。"
+    },
+    {
+      "id": "xiaomi/mimo-v2.5-tts-voicedesign",
+      "name": "MiMo-V2.5-TTS-VoiceDesign",
+      "reason": "上游标记 v2_only 后从 models.json 排除；规范 ID 与名称仍保留在上游源码。"
+    }
+  ],
+  "aliases": [
+    {
+      "id": "databricks/databricks-claude-sonnet-4",
+      "canonical_id": "anthropic/claude-sonnet-4-20250514",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/6ed2ecb821af"
+    },
+    {
+      "id": "databricks/databricks-gemini-2-5-flash",
+      "canonical_id": "google/gemini-2.5-flash",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/6ed2ecb821af"
+    },
+    {
+      "id": "databricks/databricks-gemini-2-5-pro",
+      "canonical_id": "google/gemini-2.5-pro",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/6ed2ecb821af"
+    },
+    {
+      "id": "databricks/databricks-gemini-3-pro",
+      "canonical_id": "google/gemini-3-pro-preview",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/6ed2ecb821af"
+    },
+    {
+      "id": "databricks/databricks-kimi-k2-7-code",
+      "canonical_id": "moonshotai/kimi-k2.7-code",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/6ed2ecb821af"
+    },
+    {
+      "id": "deepinfra/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+      "canonical_id": "meta/llama-4-maverick-17b-instruct",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/e944b38c326f"
+    },
+    {
+      "id": "fireworks-ai/accounts/fireworks/routers/kimi-k3-spot",
+      "canonical_id": "moonshotai/kimi-k3",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model，但注释说明 Spot 路由未独立探测、身份为 assumed（404 离线移除）；标为 upstream_assumed 仅留档，不用于取名。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/45aaa380ff10",
+      "evidence_strength": "upstream_assumed"
+    },
+    {
+      "id": "nano-gpt/moonshotai/Kimi-K2-Instruct-0905",
+      "canonical_id": "moonshotai/kimi-k2-0905",
+      "reason": "provider 目录同步移除；移除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/2057aa9e7597"
+    },
+    {
+      "id": "thinkingmachines/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "canonical_id": "nvidia/nemotron-3-nano-30b-a3b",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/056a5f0b82eb"
+    },
+    {
+      "id": "togetherai/Qwen/Qwen2.5-7B-Instruct-Turbo",
+      "canonical_id": "alibaba/qwen2.5-7b-instruct",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/c36930455d7a"
+    },
+    {
+      "id": "togetherai/Qwen/Qwen3-235B-A22B-Instruct-2507-tput",
+      "canonical_id": "alibaba/qwen3-235b-a22b-instruct-2507",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/c36930455d7a"
+    },
+    {
+      "id": "togetherai/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+      "canonical_id": "alibaba/qwen3-coder-480b-a35b-instruct",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/c36930455d7a"
+    },
+    {
+      "id": "togetherai/Qwen/Qwen3-Coder-Next-FP8",
+      "canonical_id": "alibaba/qwen3-coder-next",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/c36930455d7a"
+    },
+    {
+      "id": "togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+      "canonical_id": "meta/llama-3.3-70b-instruct",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/c36930455d7a"
+    },
+    {
+      "id": "edenai/vertex/gemini-4-argon",
+      "canonical_id": "google/gemini-4-argon",
+      "reason": "provider 目录同步删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/327c119da0b90bf266504857e46dc02a393adb1c"
+    },
+    {
+      "id": "edenai/vertex/gemini-4-argon@eu",
+      "canonical_id": "google/gemini-4-argon",
+      "reason": "provider 目录同步删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/327c119da0b90bf266504857e46dc02a393adb1c"
+    },
+    {
+      "id": "edenai/vertex/gemini-4-argon@us",
+      "canonical_id": "google/gemini-4-argon",
+      "reason": "provider 目录同步删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/327c119da0b90bf266504857e46dc02a393adb1c"
+    },
+    {
+      "id": "edenai/vertex/gemini-pro-latest",
+      "canonical_id": "google/gemini-4-argon",
+      "reason": "provider 目录同步删除；删除前 TOML 显式 base_model，名称亦注明 Gemini 4 Argon。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/327c119da0b90bf266504857e46dc02a393adb1c"
+    },
+    {
+      "id": "empiriolabs/gemma-3-27b",
+      "canonical_id": "google/gemma-3-27b-it",
+      "reason": "provider 条目已标 deprecated 后删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/9e376549545a7e7d63a67761c1c093915dfd344d"
+    },
+    {
+      "id": "volcengine-coding-plan/doubao-seed-2.0-lite",
+      "canonical_id": "bytedance-seed/seed-2.0-lite",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/32b3ad9c0262"
+    },
+    {
+      "id": "volcengine-coding-plan/doubao-seed-2.1-turbo",
+      "canonical_id": "bytedance-seed/seed-2.1-turbo",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/32b3ad9c0262"
+    },
+    {
+      "id": "volcengine/doubao-seed-1-6-251015",
+      "canonical_id": "bytedance-seed/seed-1-6",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/32b3ad9c0262"
+    },
+    {
+      "id": "volcengine/doubao-seed-1-6-flash-250828",
+      "canonical_id": "bytedance-seed/seed-1-6-flash",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/32b3ad9c0262"
+    },
+    {
+      "id": "volcengine/doubao-seed-1-6-vision-250815",
+      "canonical_id": "bytedance-seed/seed-1-6-vision",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/32b3ad9c0262"
+    },
+    {
+      "id": "volcengine/doubao-seed-1-8-251228",
+      "canonical_id": "bytedance-seed/seed-1-8",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/32b3ad9c0262"
+    },
+    {
+      "id": "volcengine/doubao-seed-2-0-code-preview-260215",
+      "canonical_id": "bytedance-seed/seed-2.0-code",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model。",
+      "evidence": "https://github.com/anomalyco/models.dev/commit/32b3ad9c0262"
+    }
+  ]
+}
