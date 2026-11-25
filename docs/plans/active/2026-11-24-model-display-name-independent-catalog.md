@@ -1,7 +1,8 @@
 # 模型展示名：独立目录查询与裸 ID 正式名
 
 - 分支：`fix/model-display-name-catalog`，基线 `origin/main` `fe07171`（v0.9.8）。
-- 状态：**实施完成，待审查**（提交钩子与最新 HEAD 必需 CI 另行回填）。
+- 状态：**实施完成，PR [#82](https://github.com/ywltby/tokenscope/pull/82) 待审查**；
+  `79ed3b7` 的必需 CI 全绿，见 §8。
 - 发行版本：产品输入改动，按仓库工具取 patch **0.9.9**；视图快照 24 → 25。
 - 发布准备：上一版 `v0.9.8` 已用 `scripts/upgrade_baselines.py add` 登记，
   `check --base-ref origin/main` 通过（资产逐个下载核对哈希）。
@@ -125,3 +126,26 @@ canonical 关系与发布方页面，**不列为缺来源**。`catalog.json` 的
 - 三处标签：`bare_id_with_many_channels_shared_by_aggregate_chart_and_rollup`
   对 12 个渠道的 `claude-opus-4-8` 断言聚合行、图表共用的 `Group.label` 与 CCS
   日行标签一致；原始 ID 下钻命中，请求数/四桶/费用经 `reconcile` 守恒。
+
+## 8. 交付与门禁
+
+- 分支 `fix/model-display-name-catalog`，PR
+  [#82](https://github.com/ywltby/tokenscope/pull/82)（基线 `origin/main` `fe07171`）。
+- 提交：`beb88c7` 独立目录与解析；`ae3b8b1` 登记 v0.9.8 升级基线；`79ed3b7`
+  原生身份契约回归修复。本文件回填为 docs-only 提交，不改变代码。
+- 本地提交钩子（完整模式）：两模式 clippy `-D warnings`、默认与 acceptance
+  全量测试、前端 typecheck / format / 1222 单测 / build / 浏览器契约、脚本契约
+  与文档检查全部通过。
+- `beb88c7` 的 PR CI：`rust`、`rust-acceptance`、`contracts`、`frontend`、`gate`
+  通过；`install-test` 与含 0.9.8 的全部 `upgrade-test` 通过；`native-ui` **失败**。
+- 该失败是真实回归，不是环境抖动：原生场景 `model_variants_merge_with_friendly_name`
+  断言标签等于夹具渠道名 `Synthetic Opus 5.5`，而新规则对真实 ID `claude-opus-5-5`
+  取发布方规范名 `Claude Opus 5.5`。已在 `79ed3b7` 改为断言发布方名可见、
+  渠道名不可见，并补一条反例单测（标签退回渠道名时判定必须失败）；夹具渠道名保留
+  作为同末段近似名的对照。
+- `79ed3b7` 的 PR CI：`rust`、`rust-acceptance`、`contracts`、`frontend`、`gate`、
+  `install-test`、`native-ui` 全部通过。
+- 附带改动：`frontend/vitest.config.ts` 的 `testTimeout` 5s → 20s。`Settings.test.ts`
+  的 U06 用例含 1.5s 保存串行队列等待，单独跑 1.5–2.0s；在 windows-latest（4 vCPU）
+  与本地「Rust 构建后立刻跑前端」的负载下连续三次超时（不是断言失败）。用例集合与
+  断言不变。
