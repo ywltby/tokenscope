@@ -7,8 +7,8 @@
     "history": {
       "fixture": "scripts/fixtures/model_display_catalog_history.json",
       "models": 4,
-      "aliases": 26,
-      "note": "仅补回有提交证据的历史身份；当前上游名称与改指向优先，不自动合并旧目录。"
+      "aliases": 25,
+      "note": "仅补回当前目录已消失且具备可信提交证据的历史身份；弱证据（upstream_assumed）仅留档不用于取名，当前条目存在时以现行目录为准，不自动合并旧目录。"
     }
   },
   "models": [
@@ -1949,6 +1949,10 @@
       "name": "GPT-6 Astra (Fast)"
     },
     {
+      "id": "openai/gpt-6-astra-healthcare",
+      "name": "GPT-6 Astra Healthcare"
+    },
+    {
       "id": "openai/gpt-6-cyber",
       "name": "GPT-6 Cyber"
     },
@@ -1965,6 +1969,10 @@
       "name": "GPT-6.1 Sol"
     },
     {
+      "id": "openai/gpt-6.1-sol-healthcare",
+      "name": "GPT-6.1 Sol Healthcare"
+    },
+    {
       "id": "openai/gpt-6.1-terra",
       "name": "GPT-6.1 Terra"
     },
@@ -1973,8 +1981,16 @@
       "name": "GPT-6.2 Astra"
     },
     {
+      "id": "openai/gpt-6.2-astra-healthcare",
+      "name": "GPT-6.2 Astra Healthcare"
+    },
+    {
       "id": "openai/gpt-6.2-sol",
       "name": "GPT-6.2 Sol"
+    },
+    {
+      "id": "openai/gpt-6.2-sol-healthcare",
+      "name": "GPT-6.2 Sol Healthcare"
     },
     {
       "id": "openai/gpt-image-1",
@@ -8203,15 +8219,7 @@
       "canonical_id": "zhipuai/glm-5.3-flash"
     },
     {
-      "id": "cohere/north-mini-code-1.0",
-      "canonical_id": "cohere/north-mini-code-1-0"
-    },
-    {
       "id": "cohere/north-small-translate-09-2026",
-      "canonical_id": "cohere/north-small-translate-1-0"
-    },
-    {
-      "id": "cohere/north-small-translate-1.0",
       "canonical_id": "cohere/north-small-translate-1-0"
     },
     {
@@ -13384,10 +13392,6 @@
     },
     {
       "id": "fireworks-ai/accounts/fireworks/routers/kimi-k3-fast",
-      "canonical_id": "moonshotai/kimi-k3"
-    },
-    {
-      "id": "fireworks-ai/accounts/fireworks/routers/kimi-k3-spot",
       "canonical_id": "moonshotai/kimi-k3"
     },
     {
@@ -30885,10 +30889,6 @@
     {
       "id": "qvac/qwen3.6-35b-a3b",
       "canonical_id": "alibaba/qwen3.6-35b-a3b"
-    },
-    {
-      "id": "reflection/Beam-1.0-501B-A23B",
-      "canonical_id": "reflection/beam-1.0-501b-a23b"
     },
     {
       "id": "refuseless/deepseek-v4.1-flash-abliterated",

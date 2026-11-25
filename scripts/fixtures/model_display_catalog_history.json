@@ -1,6 +1,6 @@
 {
   "source": {
-    "note": "仅保留有上游提交证据的历史身份；当前 models.json/api.json 优先，本层不覆盖当前改名或改指向。",
+    "note": "仅保留有上游提交证据的历史身份；当前 models.json/api.json 存在对应条目时一律以现行目录为准，本层仅补已消失条目；标为 upstream_assumed 的弱证据仅留档，不用于生成可用别名。",
     "models": "https://github.com/anomalyco/models.dev/commit/491502c0bec9",
     "aliases": [
       "https://github.com/anomalyco/models.dev/commit/6ed2ecb821af",
@@ -76,7 +76,7 @@
     {
       "id": "fireworks-ai/accounts/fireworks/routers/kimi-k3-spot",
       "canonical_id": "moonshotai/kimi-k3",
-      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model，但注释说明 Spot 路由未独立探测、身份为 assumed，弱证据。",
+      "reason": "provider 条目退休删除；删除前 TOML 显式 base_model，但注释说明 Spot 路由未独立探测、身份为 assumed（404 离线移除）；标为 upstream_assumed 仅留档，不用于取名。",
       "evidence": "https://github.com/anomalyco/models.dev/commit/45aaa380ff10",
       "evidence_strength": "upstream_assumed"
     },

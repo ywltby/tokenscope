@@ -79,23 +79,256 @@ function Write-LogLine {
     }
 }
 
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class InstallHelperTestWindowProbe {
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+}
+"@
+
 function New-GuiStandInProcess {
-    # GUI 替身：notepad 有真实主窗口，CloseMainWindow（WM_CLOSE）→
-    # 干净退出、退出码 0——与真实 GUI 应用（close_action = "quit"）的
-    # 关闭语义一致。pwsh 是控制台宿主：关窗即 0xC000013A，不能作为
-    # "优雅退出 0"的替身。
-    $proc = Start-Process -FilePath "notepad.exe" -PassThru
+    # 最小受控 GUI 替身子进程：
+    # - 进程启动后先对全线程调用 ImmDisableIME(-1) 并对窗口解除 IME 上下文，
+    #   避免本机桌面中文 IME 浮窗（如 UAC_InputIndicatorOverlayWnd）抢占
+    #   Process.MainWindowHandle；
+    # - 创建可见但不抢焦点的顶层 Win32 主窗口（SW_SHOWNOACTIVATE），消息循环
+    #   就绪后经 WM_APP 原子写出 {pid, hwnd, ime_disabled} 就绪信号；
+    # - 收到 CloseMainWindow（WM_CLOSE）后 DestroyWindow → PostQuitMessage(0)，
+    #   以退出码 0 干净退出；超时定时器兜底防孤儿窗口残留。
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $readyPath = Join-Path $Root "gui-standin.ready.json"
+    $childPath = Join-Path $Root "gui-standin.ps1"
+    $quote = { param($path) "'" + $path.Replace("'", "''") + "'" }
+    $childScript = @"
+`$ErrorActionPreference = "Stop"
+Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class TokenScopeGuiStandIn {
+    private const uint WM_DESTROY = 0x0002;
+    private const uint WM_CLOSE = 0x0010;
+    private const uint WM_TIMER = 0x0113;
+    private const uint WM_APP_READY = 0x8001;
+    private const uint WS_OVERLAPPEDWINDOW = 0x00CF0000;
+    private const int SW_SHOWNOACTIVATE = 4;
+    private const uint TIMER_TIMEOUT_ID = 1;
+
+    private delegate IntPtr WndProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct WNDCLASSEX {
+        public uint cbSize;
+        public uint style;
+        public WndProcDelegate lpfnWndProc;
+        public int cbClsExtra;
+        public int cbWndExtra;
+        public IntPtr hInstance;
+        public IntPtr hIcon;
+        public IntPtr hCursor;
+        public IntPtr hbrBackground;
+        public string lpszMenuName;
+        public string lpszClassName;
+        public IntPtr hIconSm;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT {
+        public int x;
+        public int y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG {
+        public IntPtr hwnd;
+        public uint message;
+        public IntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public POINT pt;
+    }
+
+    [DllImport("imm32.dll")]
+    private static extern bool ImmDisableIME(uint idThread);
+
+    [DllImport("imm32.dll")]
+    private static extern IntPtr ImmAssociateContext(IntPtr hWnd, IntPtr hIMC);
+
+    [DllImport("imm32.dll")]
+    private static extern IntPtr ImmGetContext(IntPtr hWnd);
+
+    [DllImport("imm32.dll")]
+    private static extern bool ImmReleaseContext(IntPtr hWnd, IntPtr hIMC);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern ushort RegisterClassEx(ref WNDCLASSEX lpwcx);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateWindowEx(
+        uint dwExStyle, string lpClassName, string lpWindowName, uint dwStyle,
+        int x, int y, int nWidth, int nHeight,
+        IntPtr hWndParent, IntPtr hMenu, IntPtr hInstance, IntPtr lpParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    private static extern bool UpdateWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool DestroyWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern void PostQuitMessage(int nExitCode);
+
+    [DllImport("user32.dll")]
+    private static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
+    [DllImport("user32.dll")]
+    private static extern bool TranslateMessage(ref MSG lpMsg);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr DispatchMessage(ref MSG lpMsg);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr DefWindowProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetTimer(IntPtr hWnd, IntPtr nIDEvent, uint uElapse, IntPtr lpTimerFunc);
+
+    private static string _readyPath;
+    private static int _exitCode = 0;
+    private static WndProcDelegate _pinnedProc;
+
+    private static IntPtr WndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam) {
+        if (msg == WM_APP_READY) {
+            if (!string.IsNullOrEmpty(_readyPath)) {
+                IntPtr imc = ImmGetContext(hWnd);
+                bool imeDisabled = (imc == IntPtr.Zero);
+                if (imc != IntPtr.Zero) {
+                    ImmReleaseContext(hWnd, imc);
+                }
+                string tmp = _readyPath + ".tmp";
+                string payload = "{\"pid\":" + Environment.ProcessId +
+                    ",\"hwnd\":" + hWnd.ToInt64() +
+                    ",\"ime_disabled\":" + (imeDisabled ? "true" : "false") + "}";
+                File.WriteAllText(tmp, payload, new UTF8Encoding(false));
+                File.Move(tmp, _readyPath, true);
+            }
+            return IntPtr.Zero;
+        }
+        if (msg == WM_TIMER && wParam == (IntPtr)TIMER_TIMEOUT_ID) {
+            _exitCode = 124;
+            DestroyWindow(hWnd);
+            return IntPtr.Zero;
+        }
+        if (msg == WM_CLOSE) {
+            _exitCode = 0;
+            DestroyWindow(hWnd);
+            return IntPtr.Zero;
+        }
+        if (msg == WM_DESTROY) {
+            PostQuitMessage(_exitCode);
+            return IntPtr.Zero;
+        }
+        return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    public static int Run(string readyPath, uint maxLifetimeMs) {
+        ImmDisableIME(0xFFFFFFFFu);
+        _readyPath = readyPath;
+        _pinnedProc = new WndProcDelegate(WndProc);
+        IntPtr hInstance = GetModuleHandle(null);
+        string className = "TokenScopeInstallContractGui_" + Environment.ProcessId;
+        var wc = new WNDCLASSEX {
+            cbSize = (uint)Marshal.SizeOf<WNDCLASSEX>(),
+            lpfnWndProc = _pinnedProc,
+            hInstance = hInstance,
+            lpszClassName = className
+        };
+        if (RegisterClassEx(ref wc) == 0) {
+            return 2;
+        }
+        IntPtr hwnd = CreateWindowEx(
+            0, className, "TokenScope Install Contract Stand-In", WS_OVERLAPPEDWINDOW,
+            0, 0, 240, 120,
+            IntPtr.Zero, IntPtr.Zero, hInstance, IntPtr.Zero);
+        if (hwnd == IntPtr.Zero) {
+            return 3;
+        }
+        ImmAssociateContext(hwnd, IntPtr.Zero);
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        UpdateWindow(hwnd);
+        SetTimer(hwnd, (IntPtr)TIMER_TIMEOUT_ID, maxLifetimeMs, IntPtr.Zero);
+        PostMessage(hwnd, WM_APP_READY, IntPtr.Zero, IntPtr.Zero);
+        MSG msg;
+        while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) {
+            TranslateMessage(ref msg);
+            DispatchMessage(ref msg);
+        }
+        GC.KeepAlive(_pinnedProc);
+        return _exitCode;
+    }
+}
+'@
+exit ([TokenScopeGuiStandIn]::Run($(& $quote $readyPath), 60000u))
+"@
+    Set-Content -LiteralPath $childPath -Value $childScript -Encoding utf8NoBOM
+    $launcher = "& $(& $quote $childPath)"
+    $encoded = [System.Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($launcher))
+    $proc = Start-Process -FilePath "pwsh" -ArgumentList "-NoProfile", "-EncodedCommand", $encoded -WindowStyle Hidden -PassThru
     try {
-        # Start-Process 返回时窗口可能尚未创建；等待本进程的有效窗口句柄，
-        # 不能让固定的一秒观察期充当 GUI 初始化完成信号。
+        # 等待子进程通过就绪信号回报目标 HWND，并核验：
+        # 1) 目标 HWND 真实可见且属于该子进程 PID；
+        # 2) Process.MainWindowHandle 明确指向该目标 HWND。
         $watch = [System.Diagnostics.Stopwatch]::StartNew()
         while ($watch.Elapsed.TotalSeconds -lt 30) {
             $proc.Refresh()
             if ($proc.HasExited) { throw "GUI 替身在窗口就绪前退出：$($proc.ExitCode)" }
-            if ($proc.MainWindowHandle -ne [System.IntPtr]::Zero) { return $proc }
+            if (Test-Path -LiteralPath $readyPath) {
+                $signal = Get-Content -LiteralPath $readyPath -Raw -Encoding utf8 | ConvertFrom-Json
+                if ([int]$signal.pid -ne $proc.Id) {
+                    throw "GUI 替身就绪信号 PID 不匹配：信号 $($signal.pid) != 进程 $($proc.Id)"
+                }
+                $targetHwnd = [System.IntPtr]::new([long]$signal.hwnd)
+                if ($targetHwnd -eq [System.IntPtr]::Zero) {
+                    throw "GUI 替身就绪信号返回空 HWND"
+                }
+                [uint32]$ownerPid = 0
+                [void][InstallHelperTestWindowProbe]::GetWindowThreadProcessId($targetHwnd, [ref]$ownerPid)
+                if ([InstallHelperTestWindowProbe]::IsWindow($targetHwnd) -and
+                    [InstallHelperTestWindowProbe]::IsWindowVisible($targetHwnd) -and
+                    $ownerPid -eq [uint32]$proc.Id -and
+                    $proc.MainWindowHandle -eq $targetHwnd) {
+                    return [pscustomobject]@{
+                        Process     = $proc
+                        TargetHwnd  = $targetHwnd
+                        OwnerPid    = $ownerPid
+                        ImeDisabled = [bool]$signal.ime_disabled
+                    }
+                }
+            }
             Start-Sleep -Milliseconds 50
         }
-        throw "GUI 替身未在 30 秒内创建本进程窗口"
+        $proc.Refresh()
+        throw "GUI 替身未在 30 秒内就绪（MainWindowHandle=$($proc.MainWindowHandle)）"
     }
     catch {
         if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
@@ -351,15 +584,21 @@ finally {
 Write-Host "=== 正例：完整生命周期 ==="
 $s = New-Scenario "full-lifecycle"
 Write-LogLine -LogsDir $s.LogsDir -FileName "tokenscope.log" -Line $SummaryOk
-$proc = New-GuiStandInProcess
+$gui = New-GuiStandInProcess -Root $s.Root
+$proc = $gui.Process
 $s.Context.Process = $proc
 $s.Context.Pid = $proc.Id
 try {
+    Test-True $gui.ImeDisabled "GUI 替身主窗口已禁用 IME"
+    Test-True ($gui.TargetHwnd -ne [System.IntPtr]::Zero -and $gui.OwnerPid -eq [uint32]$proc.Id) "就绪信号目标 HWND 属于替身 PID"
+    $proc.Refresh()
+    Test-True ($proc.MainWindowHandle -eq $gui.TargetHwnd) "Process.MainWindowHandle 指向替身目标 HWND"
     $summary = Wait-CurrentSummary -Context $s.Context -ExpectedRequests 3 -TimeoutSeconds 15
     Observe-ProcessAlive -Context $s.Context -DurationSeconds 1 -PollMilliseconds 100
     Close-AppGracefully -Context $s.Context
     Test-True ($s.Context.Stage -eq "closed") "生命周期到 closed"
     Test-True ($s.Context.Pid -eq $proc.Id) "PID 全程一致"
+    Test-True ($proc.HasExited -and $proc.ExitCode -eq 0) "替身进程经 CloseMainWindow 在时限内退出且退出码为 0"
     Test-True ($s.Context.QueryId -eq "q-alpha-1") "query_id 全程一致"
 }
 catch {

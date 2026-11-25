@@ -2334,6 +2334,12 @@ impl Pricing {
         }
     }
 
+    /// 测试用：使用合成的随包展示名目录 JSON 验证离线与快照解析。
+    pub fn with_display_catalog_json_for_tests(mut self, json: &str) -> Self {
+        self.display_names = self.display_names.with_embedded_json_for_tests(json);
+        self
+    }
+
     fn add_entry(&mut self, e: Entry) {
         self.by_prefix
             .entry(e.prefix.as_bytes().to_vec())

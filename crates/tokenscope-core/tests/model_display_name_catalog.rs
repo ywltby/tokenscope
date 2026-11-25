@@ -5,7 +5,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tokenscope::model::TokenCounts;
+use tokenscope::aggregate::{GroupBy, aggregate, resolve_tz};
+use tokenscope::model::{AgentKind, TokenCounts, UsageEvent};
 use tokenscope::modelsdev::sync_with_body_for_tests;
 use tokenscope::pricing::{DisplayNameReason, Pricing};
 
@@ -392,7 +393,6 @@ fn retired_catalog_identities_keep_verified_offline_names() {
         ("doubao-seed-1-6-251015", "Seed 1.6"),
         ("doubao-seed-1-6-flash-250828", "Seed 1.6 Flash"),
         ("doubao-seed-1-8-251228", "Seed 1.8"),
-        ("kimi-k3-spot", "Kimi K3"),
         ("mimo-v2-tts", "MiMo-V2-TTS"),
         ("mimo-v2.5-tts", "MiMo-V2.5-TTS"),
         ("mimo-v2.5-tts-voiceclone", "MiMo-V2.5-TTS-VoiceClone"),
@@ -419,6 +419,271 @@ fn retired_catalog_identities_keep_verified_offline_names() {
             .as_deref(),
         Some("Kimi K3.1 Pro")
     );
+    // 完整 ID 等价自指别名（如 `.` vs `-` 或大小写差异）不写入别名表，仍直接命中自身规范名。
+    for (id, expected) in [
+        ("cohere/north-mini-code-1.0", "North Mini Code"),
+        ("cohere/north-small-translate-1.0", "North Small Translate"),
+        ("reflection/Beam-1.0-501B-A23B", "Beam 1.0 501B A23B"),
+    ] {
+        let r = p.display_name_resolution_for(id);
+        assert_eq!(r.name.as_deref(), Some(expected), "{id}: {r:?}");
+        assert_eq!(r.reason, DisplayNameReason::ResolvedCatalog, "{id}");
+    }
+}
+
+fn synthetic_event(model: &str) -> UsageEvent {
+    UsageEvent {
+        ts: "2026-11-25T10:00:00Z".parse().unwrap(),
+        agent: AgentKind::ClaudeCode,
+        model: model.to_string(),
+        session_id: "sess-display".to_string(),
+        project: "/demo".to_string(),
+        session_initial_cwd: None,
+        event_cwd: None,
+        record_id: format!("rec-{model}"),
+        claude_copy: None,
+        codex_response: None,
+        codex_legacy_origin: None,
+        line: 0,
+        source_path: String::new(),
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_write_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
+    }
+}
+
+/// DN-C16：弱证据历史条目（Fireworks `kimi-k3-spot`，上游标记 `upstream_assumed`）
+/// 只留档、不进入可用别名；无其他可信证据时裸 ID 与完整 ID 均保留原始 ID，
+/// 若现行目录日后提供独立有效映射仍按现行规则解析。
+#[test]
+fn weak_evidence_kimi_spot_keeps_raw_id_until_current_catalog_verifies() {
+    let (offline, _) = Pricing::load(None, None, None);
+    let full_id = "fireworks-ai/accounts/fireworks/routers/kimi-k3-spot";
+
+    let bare_res = offline.display_name_resolution_for("kimi-k3-spot");
+    assert_eq!(
+        bare_res.name, None,
+        "弱证据不得用于裸 ID 取名: {bare_res:?}"
+    );
+    assert_eq!(bare_res.reason, DisplayNameReason::NoIdentityEvidence);
+
+    let full_res = offline.display_name_resolution_for(full_id);
+    assert_eq!(
+        full_res.name, None,
+        "弱证据不得用于完整 ID 取名: {full_res:?}"
+    );
+    assert_eq!(full_res.reason, DisplayNameReason::NoTrustedName);
+
+    let (tz, _) = resolve_tz(None).unwrap();
+    for (raw, expected_key) in [
+        ("kimi-k3-spot", "kimik3spot"),
+        (full_id, "fireworksai/accounts/fireworks/routers/kimik3spot"),
+    ] {
+        let report = aggregate(&[synthetic_event(raw)], GroupBy::Model, &tz, &offline).unwrap();
+        let groups: Vec<_> = report.groups.iter().filter(|g| g.key != "合计").collect();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].key, expected_key, "分组键不得变化: {raw}");
+        assert_eq!(
+            groups[0].label.as_deref(),
+            Some(raw),
+            "聚合标签必须保留原始 ID: {raw}"
+        );
+    }
+
+    // 现行目录日后给出独立、有效的 canonical_model_id 时，仍按现行规则解析。
+    for (target, expected_name) in [
+        ("moonshotai/kimi-k3", "Kimi K3"),
+        ("moonshotai/kimi-k3.1-pro", "Kimi K3.1 Pro"),
+    ] {
+        let dir = tmp("kimi-spot-live");
+        let snap = sync(
+            &dir,
+            &format!(
+                r#"{{
+                    "fireworks-ai":{{"models":{{
+                        "accounts/fireworks/routers/kimi-k3-spot":{{
+                            "name":"Kimi Spot",
+                            "canonical_model_id":"{target}",
+                            "cost":{{"input":2.1,"output":10.5}}
+                        }}
+                    }}}}
+                }}"#
+            ),
+        );
+        let (live, _) = Pricing::load(None, Some(&snap), None);
+        assert_eq!(
+            live.display_name_for(full_id).as_deref(),
+            Some(expected_name),
+            "现行目录独立映射应生效（完整 ID -> {target}）"
+        );
+        assert_eq!(
+            live.display_name_for("kimi-k3-spot").as_deref(),
+            Some(expected_name),
+            "现行目录独立映射应生效（裸 ID -> {target}）"
+        );
+    }
+}
+
+/// DN-C17：现行条目仍存在但无可用 canonical 映射（缺失、自指、指向未收录模型）时，
+/// 生成器不输出历史别名；离线解析与聚合绝不会显示旧目标 `Old Model`，
+/// 有自身规范名时照常使用，否则保留原始 ID，且对大小写/分隔符与目录乱序不敏感。
+#[test]
+fn present_entry_without_usable_mapping_never_displays_old_target_offline() {
+    let without_own_forward = r#"{
+        "models": [
+            {"id": "publisher/current", "name": "Current Model"},
+            {"id": "publisher/old", "name": "Old Model"}
+        ],
+        "aliases": [
+            {"id": "relay/retargeted-m", "canonical_id": "publisher/current"},
+            {"id": "retired/gone-m", "canonical_id": "publisher/old"}
+        ]
+    }"#;
+    let without_own_reversed = r#"{
+        "aliases": [
+            {"id": "retired/gone-m", "canonical_id": "publisher/old"},
+            {"id": "relay/retargeted-m", "canonical_id": "publisher/current"}
+        ],
+        "models": [
+            {"id": "publisher/old", "name": "Old Model"},
+            {"id": "publisher/current", "name": "Current Model"}
+        ]
+    }"#;
+    let (tz, _) = resolve_tz(None).unwrap();
+    for json in [without_own_forward, without_own_reversed] {
+        let p = Pricing::empty().with_display_catalog_json_for_tests(json);
+        // 现行条目（含大小写/分隔符写法）与裸 ID 均不得显示 Old Model。
+        for raw in ["relay/present-m", "Relay/Present_M", "relay/present.m"] {
+            let res = p.display_name_resolution_for(raw);
+            assert_eq!(res.name, None, "{raw}: {res:?}");
+            assert_eq!(res.reason, DisplayNameReason::NoTrustedName, "{raw}");
+            let agg = aggregate(&[synthetic_event(raw)], GroupBy::Model, &tz, &p).unwrap();
+            let groups: Vec<_> = agg.groups.iter().filter(|g| g.key != "合计").collect();
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].key, "relay/presentm", "{raw}");
+            assert_eq!(groups[0].label.as_deref(), Some(raw), "{raw}");
+        }
+        let bare = p.display_name_resolution_for("present-m");
+        assert_eq!(bare.name, None, "{bare:?}");
+        assert_eq!(bare.reason, DisplayNameReason::NoIdentityEvidence);
+        // 真正退休的渠道条目与有效改指向仍照常解析。
+        assert_eq!(
+            p.display_name_for("retired/gone-m").as_deref(),
+            Some("Old Model")
+        );
+        assert_eq!(
+            p.display_name_for("relay/retargeted-m").as_deref(),
+            Some("Current Model")
+        );
+
+        // 带现行快照（缺失、自指、指向未收录目标三种情形）同样不得回落到 Old Model，
+        // 且计价与统计分组键保持原样。
+        for (tag, snap_body) in [
+            (
+                "missing",
+                r#"{"relay":{"models":{"present-m":{"cost":{"input":1,"output":2}}}}}"#,
+            ),
+            (
+                "self-ref",
+                r#"{"relay":{"models":{"present-m":{"canonical_model_id":"relay/present-m","cost":{"input":1,"output":2}}}}}"#,
+            ),
+            (
+                "unlisted",
+                r#"{"relay":{"models":{"present-m":{"canonical_model_id":"publisher/new","cost":{"input":1,"output":2}}}}}"#,
+            ),
+        ] {
+            let dir = tmp(&format!("present-{tag}"));
+            let snap = sync(&dir, snap_body);
+            let (base_p, _) = Pricing::load(None, Some(&snap), None);
+            let expected_key = base_p.model_stats_key("relay/present-m");
+            let p_snap = base_p.with_display_catalog_json_for_tests(json);
+            assert_eq!(
+                p_snap.display_name_for("relay/present-m"),
+                None,
+                "{tag} 不得回落到 Old Model"
+            );
+            assert_eq!(
+                p_snap.display_name_for("Relay/Present_M"),
+                None,
+                "{tag} 等价写法不得回落到 Old Model"
+            );
+            assert_eq!(
+                p_snap.display_name_for("present-m"),
+                None,
+                "{tag} 裸 ID 不得回落到 Old Model"
+            );
+            let agg = aggregate(
+                &[synthetic_event("relay/present-m")],
+                GroupBy::Model,
+                &tz,
+                &p_snap,
+            )
+            .unwrap();
+            let groups: Vec<_> = agg.groups.iter().filter(|g| g.key != "合计").collect();
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].key, expected_key, "{tag} 分组键不得受展示名影响");
+            assert_eq!(
+                groups[0].label.as_deref(),
+                Some("relay/present-m"),
+                "{tag} 聚合应保留原始 ID"
+            );
+            // 计价保持原值（100 input * $1/1M + 50 output * $2/1M = 0.0002）。
+            assert!((groups[0].cost_usd - 0.0002).abs() < 1e-12, "{tag}");
+        }
+    }
+
+    // 对照证明：若生成器误输出旧别名 relay/present-m -> publisher/old，离线会显示 Old Model。
+    let leaked_history = r#"{
+        "models": [{"id": "publisher/old", "name": "Old Model"}],
+        "aliases": [{"id": "relay/present-m", "canonical_id": "publisher/old"}]
+    }"#;
+    let leaked_p = Pricing::empty().with_display_catalog_json_for_tests(leaked_history);
+    assert_eq!(
+        leaked_p.display_name_for("relay/present-m").as_deref(),
+        Some("Old Model")
+    );
+
+    // 现行条目已有可信自身规范名时，照常显示自身规范名，不显示旧目标 Old Model。
+    let with_own_forward = r#"{
+        "models": [
+            {"id": "publisher/old", "name": "Old Model"},
+            {"id": "relay/present-m", "name": "Relay Present Model"}
+        ],
+        "aliases": [
+            {"id": "retired/gone-m", "canonical_id": "publisher/old"}
+        ]
+    }"#;
+    let with_own_reversed = r#"{
+        "aliases": [
+            {"id": "retired/gone-m", "canonical_id": "publisher/old"}
+        ],
+        "models": [
+            {"id": "relay/present-m", "name": "Relay Present Model"},
+            {"id": "publisher/old", "name": "Old Model"}
+        ]
+    }"#;
+    for json in [with_own_forward, with_own_reversed] {
+        let p = Pricing::empty().with_display_catalog_json_for_tests(json);
+        for raw in ["relay/present-m", "Relay/Present_M", "present-m"] {
+            assert_eq!(
+                p.display_name_for(raw).as_deref(),
+                Some("Relay Present Model"),
+                "{raw}"
+            );
+            let agg = aggregate(&[synthetic_event(raw)], GroupBy::Model, &tz, &p).unwrap();
+            let groups: Vec<_> = agg.groups.iter().filter(|g| g.key != "合计").collect();
+            assert_eq!(groups.len(), 1);
+            assert_eq!(
+                groups[0].label.as_deref(),
+                Some("Relay Present Model"),
+                "{raw}"
+            );
+        }
+    }
 }
 
 /// DN-C11：快照里的 canonical 关系也不得覆盖完整 ID 自身的规范名；没有自身

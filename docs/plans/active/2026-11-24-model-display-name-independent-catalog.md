@@ -2,7 +2,7 @@
 
 - 分支：`fix/model-display-name-catalog`，基线 `origin/main` `fe07171`（v0.9.8）。
 - 状态：**实施完成，PR [#82](https://github.com/ywltby/tokenscope/pull/82) 待审查**；
-  `79ed3b7` 的必需 CI 全绿，见 §8；复核补修批次见 §9。
+  `79ed3b7` 的必需 CI 全绿，见 §8；复核补修批次见 §9、§10、§11。
 - 发行版本：产品输入改动，按仓库工具取 patch **0.9.9**；视图快照 24 → 25。
 - 发布准备：上一版 `v0.9.8` 已用 `scripts/upgrade_baselines.py add` 登记，
   `check --base-ref origin/main` 通过（资产逐个下载核对哈希）。
@@ -269,7 +269,8 @@ Doubao 2.0 对照继续通过。该查询回归在独立子进程运行，避免
   `databricks-gemini-2-5-pro`、`databricks-gemini-3-pro`、`databricks-kimi-k2-7-code`。
 - DeepInfra 1 条：`meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`。
 - Fireworks 1 条：`kimi-k3-spot`。删除前上游显式 `base_model`，但注释承认 Spot
-  路由未独立探测、身份为 assumed；夹具标为 `upstream_assumed` 弱证据，不伪装成已独立验证。
+  路由未独立探测、身份为 assumed；夹具标为 `upstream_assumed` 弱证据，不伪装成已独立验证
+  （§11 起仅留档、不再写入可用别名，离线保留原始 ID）。
 - NanoGPT 1 条：`Kimi-K2-Instruct-0905`；ThinkingMachines 1 条：
   `NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`。
 - TogetherAI 5 条：`Qwen2.5-7B-Instruct-Turbo`、
@@ -282,14 +283,16 @@ Doubao 2.0 对照继续通过。该查询回归在独立子进程运行，避免
 - Eden AI 4 条：`gemini-4-argon`、`gemini-4-argon@eu`、`gemini-4-argon@us`、
   `gemini-pro-latest`；EmpirioLabs 1 条：`gemma-3-27b`（删除前已标 deprecated）。
 
-`a9f509e` 中失去名称的 15 个裸 ID 已全部恢复：
+`a9f509e` 中失去名称的 15 个裸 ID 在 §10 曾全部恢复；§11 复核把弱证据
+`kimi-k3-spot` 停止用于取名后，经核实恢复的为其余 **14 个**，`kimi-k3-spot`
+仅留档并保留原始 ID：
 
-| 裸 ID | 恢复名称 |
+| 裸 ID | 当前状态 / 名称 |
 | --- | --- |
 | `doubao-seed-1-6-251015` | `Seed 1.6` |
 | `doubao-seed-1-6-flash-250828` | `Seed 1.6 Flash` |
 | `doubao-seed-1-8-251228` | `Seed 1.8` |
-| `kimi-k3-spot` | `Kimi K3` |
+| `kimi-k3-spot` | 保留原始 ID（`upstream_assumed` 弱证据仅留档，见 §11.2） |
 | `databricks-claude-sonnet-4` | `Claude Sonnet 4` |
 | `databricks-gemini-2-5-flash` | `Gemini 2.5 Flash` |
 | `databricks-gemini-2-5-pro` | `Gemini 2.5 Pro` |
@@ -302,20 +305,21 @@ Doubao 2.0 对照继续通过。该查询回归在独立子进程运行，避免
 | `mimo-v2.5-tts-voiceclone` | `MiMo-V2.5-TTS-VoiceClone` |
 | `mimo-v2.5-tts-voicedesign` | `MiMo-V2.5-TTS-VoiceDesign` |
 
-最终目录为 **644 个规范模型、8700 条别名**。相对 `a9f509e`：模型 +6 / −0 /
+本批（`f81e0fa`）目录为 **644 个规范模型、8700 条别名**（§11 重建后见 §11.3）。相对 `a9f509e`：模型 +6 / −0 /
 0 改名；别名 +6964 / −0；2 条改指向均保留当前上游值：
 `databricks/databricks-gemini-3-1-flash-lite` → `google/gemini-3.1-flash-lite`、
 `fireworks-ai/accounts/fireworks/routers/kimi-latest` → `moonshotai/kimi-k3.1-pro`。
 裸 ID 无丢失、无新增歧义；新增 76 个可解析裸 ID，上述 Databricks 裸 ID 随上游
 更正从 `Gemini 3.1 Flash Lite Preview` 改为 `Gemini 3.1 Flash Lite`。相对
-`24c2871`：模型 +4、别名 +21，无删除/改名/改指向，恰好恢复 15 个丢名裸 ID，
+`24c2871`：模型 +4、别名 +21，无删除/改名/改指向，当时恢复 15 个丢名裸 ID，
 无其它裸 ID 解析变化。目录有 3 组等价键重复（标点差异），目标完全相同，不构成冲突。
 
 真实冲突 `gemini-pro-latest` 保持歧义：Eden AI 两条显式指向
 `google/gemini-4-argon`，Google 自身条目指向 `google/gemini-3.1-pro-preview`；
 不以字典序猜名。无证据撤回或更正旧映射；退休/deprecated/v2_only 是可用性变化，
 不是身份否定。生成器测试覆盖历史层优先级、乱序、真实同末段关系、缺失目标与自指；
-Rust 离线回归覆盖 15 个代表项、上述真实冲突、目录乱序、同末段显式别名与两条改指向。
+Rust 离线回归覆盖上述代表项（§11 起 `kimi-k3-spot` 改由 `DN-C16` 断言保留原始 ID，
+其余 14 项继续断言恢复）、上述真实冲突、目录乱序、同末段显式别名与两条改指向。
 
 ### 10.3 本地门禁
 
@@ -338,3 +342,62 @@ Rust 离线回归覆盖 15 个代表项、上述真实冲突、目录乱序、�
   present/deleted）通过；`upgrade-chain` 按无连续升级链需求跳过。
 - Native UI E2E run [45630595961](https://github.com/ywltby/tokenscope/actions/runs/45630595961)：
   `native-ui` 10m52s 通过。`gh pr checks 82` 在最新代码 HEAD 上退出码 0。
+
+## 11. 三次复核补修批次（基线 `1632500`）
+
+目标版本仍为 **0.9.9**，沿用 PR #82，不重新取号、不改 `release-change.json`。
+
+### 11.1 历史别名仅补当前目录已消失条目（红 → 绿）
+
+旧版 `scripts/update_model_display_catalog.py` 先预装全部历史别名，仅在现行条目
+给出可用目标时覆盖。当现行 `relay/model` 仍存在、但出现以下三种情形时，生成器会
+残留历史目标 `publisher/old`，可能把现行模型显示成 `Old Model`：
+
+1. 现行条目缺失 `canonical_model_id`（含空值 / 非字符串）；
+2. 现行条目声明自指（`relay/model` 或等价写法）；
+3. 现行条目改指向尚未收录于 `models.json` 的 `publisher/new`。
+
+补修先新增覆盖上述三种情形、完整 ID 等价与乱序对照的红测试（11 项子测试均红），
+再改写生成流程，分别判定「当前条目是否存在」与「当前映射是否可用」：
+
+- 用与 Rust `ModelIdentity::identity_key` 一致的规则（trim、保留 `/` 与 `:`、删
+  `-`/`.`/`_`、仅折叠 ASCII 大小写、空基名返回缺失）记录当前 `api.json` 与
+  `models.json` 的存在集合，防止仅大小写或分隔符不同就被误判为退休；
+- 仅当前条目已消失、且历史映射有可信证据且目标有效时补回历史别名；
+- 当前条目存在且有有效新目标时使用当前目标（即使大小写/分隔符不同也不残留旧条）；
+- 当前条目存在但关系缺失、自指（含完整 ID 等价自指）或目标未收录时，不输出历史
+  映射——已有可信自身规范名照常使用，否则保留原始 ID。
+
+`scripts/test_update_model_display_catalog.py` 与 Rust 离线/快照回归
+（`DN-C17`、`model_display::tests::identity_key_matches_generator_equivalence_cases`）
+验证正/倒序输入下三种反例均不显示 `Old Model`，分组键、原始请求 ID 与计价不变。
+
+### 11.2 `kimi-k3-spot` 弱证据留档，停止用于取名
+
+核对上游 `anomalyco/models.dev` 提交 `45aaa380ff10`（移除
+`providers/fireworks-ai/models/accounts/fireworks/routers/kimi-k3-spot.toml`）：
+删除前文件注释明确注明 Spot 路由未独立探测、身份按 Standard 同胞假设（assumed），
+且实测返回 404 后被移除。
+
+`scripts/fixtures/model_display_catalog_history.json` 保留该条历史记录与
+`evidence_strength: "upstream_assumed"` 弱证据标记；生成器只将可信历史条目写入
+可用别名，跳过 `upstream_assumed`（未识别的 `evidence_strength` 直接报错防拼写漏放）。
+离线回归 `DN-C16`（先红后绿）确认：
+
+- 裸 `kimi-k3-spot`：`display_name_for` 返回 `None`（`no_identity_evidence`），聚合标签保留 `kimi-k3-spot`；
+- 完整 ID `fireworks-ai/accounts/fireworks/routers/kimi-k3-spot`：`display_name_for` 返回 `None`（`no_trusted_name`），聚合标签保留完整原始 ID；
+- 若现行目录/快照日后提供独立有效的 `canonical_model_id`（测试覆盖指向 `moonshotai/kimi-k3` 与 `moonshotai/kimi-k3.1-pro`），生成器和运行时均按现行规则解析。
+
+### 11.3 随包目录重新生成与差异审计（相对 `1632500`）
+
+使用可复现的公开 `models.json` 与 `api.json`（抓取日期 2026-11-25）重新生成
+`crates/tokenscope-core/data/model_display_catalog.json`：最终 **648 个规范模型、8696 条别名**
+（`source.history`: `models = 4`、`aliases = 25`）。相对 `1632500`（644 模型、8700 别名）：
+
+- **规范模型 +4 / −0 / 0 改名**：新增上游 `models.json` 发布的 4 个 OpenAI Healthcare 模型
+  （`openai/gpt-6-astra-healthcare`、`openai/gpt-6.1-sol-healthcare`、
+  `openai/gpt-6.2-astra-healthcare`、`openai/gpt-6.2-sol-healthcare`），无冲突、无改名。
+- **别名 +0 / −4 / 0 改指向**：
+  - `fireworks-ai/accounts/fireworks/routers/kimi-k3-spot → moonshotai/kimi-k3`：按 §11.2 停止用于取名，是**唯一的新增回退**（裸 ID 与完整 ID 均保留原始 ID）。
+  - `cohere/north-mini-code-1.0 → cohere/north-mini-code-1-0`、`cohere/north-small-translate-1.0 → cohere/north-small-translate-1-0`、`reflection/Beam-1.0-501B-A23B → reflection/beam-1.0-501b-a23b`：按 Rust 完整 ID 等价规则属于自指别名（`identity_key` 与自身规范条目一致），移出别名表后离线仍直接命中各自规范模型（`North Mini Code`、`North Small Translate`、`Beam 1.0 501B A23B`），**零回退、零改名**。
+- **保留确认**：经核实的 25 条退休渠道历史别名与 4 个 `v2_only` 模型、两条当前有效改指向、同末段显式别名、完整 ID 自身规范名优先、`gemini-pro-latest` 真实冲突与 11 个必验裸 ID 均保持不变。

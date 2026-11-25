@@ -179,6 +179,16 @@ impl NameCatalog {
         }
     }
 
+    /// 测试用：替换随包公开目录 JSON，保留已有快照名称与关系。
+    pub fn with_embedded_json_for_tests(&self, json: &str) -> Self {
+        Self {
+            embedded: Arc::new(EmbeddedIndex::from_json(json).expect("合成展示名目录必须可解析")),
+            snapshot_ids: self.snapshot_ids.clone(),
+            claims: self.claims.clone(),
+            snapshot_names: self.snapshot_names.clone(),
+        }
+    }
+
     /// 合并本次冻结的 models.dev 快照（价格层之外的名称元数据）。
     pub fn from_snapshot(snapshot: Option<&crate::modelsdev::Snapshot>) -> Self {
         let mut this = Self::offline();
@@ -536,6 +546,31 @@ mod tests {
             assert_eq!(bare.name, None, "{bare:?}");
             assert_eq!(bare.reason, DisplayNameReason::AmbiguousIdentity);
         }
+    }
+
+    #[test]
+    fn identity_key_matches_generator_equivalence_cases() {
+        assert_eq!(
+            identity_key("Relay_One/Model.V1").as_deref(),
+            Some("relayone/modelv1")
+        );
+        assert_eq!(
+            identity_key("relay-one/model-v1").as_deref(),
+            Some("relayone/modelv1")
+        );
+        assert_eq!(
+            identity_key("Relay/Opus55:FREE").as_deref(),
+            Some("relay/opus55:free")
+        );
+        assert_ne!(
+            identity_key("Relay/Opus55:FREE"),
+            identity_key("Relay/Opus55:thinking")
+        );
+        assert_eq!(
+            identity_key("Relay/模型-Δ.1").as_deref(),
+            Some("relay/模型Δ1")
+        );
+        assert_eq!(identity_key("provider/-._:free"), None);
     }
 
     #[test]
