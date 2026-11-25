@@ -1160,6 +1160,195 @@ describe("路径布局与固定判定", () => {
       }
     });
 
+    it.each(["walk", "check"])(
+      "Shared Dictionary 精确 temp-index 路径枚举后消失：%s 阶段不误判根隔离",
+      (phase) => {
+        const sandbox = createRunSandbox(`shared-dict-temp-index-${phase}`);
+        const home = sandbox.dir("home");
+        const root = sandbox.dir("home", "workspace");
+        const parts = [
+          "webview",
+          "EBWebView",
+          "Default",
+          "Shared Dictionary",
+          "cache",
+          "index-dir",
+          "temp-index",
+        ];
+        const tempIndex = sandbox.file("home", "workspace", ...parts, "idx");
+        writeManifest(sandbox, root, acceptanceManifest(root));
+        const racing = (p, opts) => {
+          if (path.resolve(String(p)) === path.resolve(tempIndex)) {
+            throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+          }
+          return fs.lstatSync(p, opts);
+        };
+        try {
+          const result = validateAcceptancePaths({
+            root,
+            homeDir: home,
+            lstat: racing,
+            collectTree:
+              phase === "walk"
+                ? (r) => collectAcceptanceTreePaths(r, { lstatSync: racing })
+                : collectAcceptanceTreePaths,
+          });
+          expect(result.ok, result.reason).toBe(true);
+        } finally {
+          sandbox.cleanup();
+        }
+      },
+    );
+
+    it.each([
+      ["tokenscope", "temp-index"],
+      ["sources", "claude", "temp-index"],
+      ["webview", "EBWebView", "Default", "Code Cache", "js", "index-dir", "temp-index"],
+      ["webview", "EBWebView", "Default", "Shared Dictionary", "other", "index-dir", "temp-index"],
+      [
+        "webview",
+        "EBWebView",
+        "Profile 1",
+        "Shared Dictionary",
+        "cache",
+        "index-dir",
+        "temp-index",
+      ],
+      [
+        "webview",
+        "EBWebView",
+        "Default",
+        "Shared Dictionary",
+        "cache",
+        "index-dir",
+        "the-real-index",
+      ],
+    ])("Shared Dictionary 之外的 temp-index 或真实索引消失仍拒绝：%j", (...parts) => {
+      const sandbox = createRunSandbox("shared-dict-out-of-scope");
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      const targetFile = sandbox.file("home", "workspace", ...parts, "idx");
+      const racing = (p, opts) => {
+        if (path.resolve(String(p)) === path.resolve(targetFile)) {
+          throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
+        }
+        return fs.lstatSync(p, opts);
+      };
+      try {
+        expect(collectAcceptanceTreePaths(root, { lstatSync: racing }).ok).toBe(false);
+        expect(validateAcceptancePaths({ root, homeDir: home, lstat: racing }).ok).toBe(false);
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
+    it.each(["EACCES", "EPERM"])("Shared Dictionary 精确 temp-index 的 %s 不豁免", (code) => {
+      const sandbox = createRunSandbox(`shared-dict-${code}`);
+      const home = sandbox.dir("home");
+      const root = sandbox.dir("home", "workspace");
+      const tempIndex = sandbox.file(
+        "home",
+        "workspace",
+        "webview",
+        "EBWebView",
+        "Default",
+        "Shared Dictionary",
+        "cache",
+        "index-dir",
+        "temp-index",
+        "idx",
+      );
+      const failing = (p, opts) => {
+        if (path.resolve(String(p)) === path.resolve(tempIndex))
+          throw Object.assign(new Error(code), { code });
+        return fs.lstatSync(p, opts);
+      };
+      try {
+        expect(collectAcceptanceTreePaths(root, { lstatSync: failing }).ok).toBe(false);
+        expect(validateAcceptancePaths({ root, homeDir: home, lstat: failing }).ok).toBe(false);
+      } finally {
+        sandbox.cleanup();
+      }
+    });
+
+    it("Shared Dictionary 精确 temp-index 仍存在时的硬链接、junction 与符号链接照常拒绝", () => {
+      const relDir = [
+        "webview",
+        "EBWebView",
+        "Default",
+        "Shared Dictionary",
+        "cache",
+        "index-dir",
+      ];
+
+      // 1) 硬链接指向根外受保护目录文件
+      const hardlinkSandbox = createRunSandbox("shared-dict-hardlink");
+      try {
+        const home = hardlinkSandbox.dir("home");
+        const root = hardlinkSandbox.dir("home", "workspace");
+        const outsideFile = hardlinkSandbox.file("home", ".tokenscope", "must-not-touch", "real");
+        const dir = hardlinkSandbox.dir("home", "workspace", ...relDir);
+        fs.linkSync(outsideFile, path.join(dir, "temp-index"));
+        const result = validateAcceptancePaths({ root, homeDir: home });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/硬链接/);
+      } finally {
+        hardlinkSandbox.cleanup();
+      }
+
+      // 2) junction 指向根外受保护目录
+      const junctionSandbox = createRunSandbox("shared-dict-junction");
+      try {
+        const home = junctionSandbox.dir("home");
+        const root = junctionSandbox.dir("home", "workspace");
+        const outsideDir = junctionSandbox.dir("home", ".tokenscope");
+        const dir = junctionSandbox.dir("home", "workspace", ...relDir);
+        junctionSandbox.link(path.join(dir, "temp-index"), outsideDir);
+        const result = validateAcceptancePaths({ root, homeDir: home });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/链接|受保护/);
+      } finally {
+        junctionSandbox.cleanup();
+      }
+
+      // 3) 符号链接指向根外路径（兼容无管理员符号链接权限的 Windows 环境）
+      const symlinkSandbox = createRunSandbox("shared-dict-symlink");
+      try {
+        const home = symlinkSandbox.dir("home");
+        const root = symlinkSandbox.dir("home", "workspace");
+        const outsideFile = symlinkSandbox.file("home", ".tokenscope", "secret.db", "real");
+        const tempIndex = symlinkSandbox.file("home", "workspace", ...relDir, "temp-index", "idx");
+        const symlinkLstat = (p, opts) => {
+          if (path.resolve(String(p)) === path.resolve(tempIndex)) {
+            return {
+              isSymbolicLink: () => true,
+              isDirectory: () => false,
+              isFile: () => false,
+              nlink: 1,
+            };
+          }
+          return fs.lstatSync(p, opts);
+        };
+        const symlinkCanonicalize = (p, opts) => {
+          if (path.resolve(String(p)) === path.resolve(tempIndex)) {
+            return { ok: true, path: fs.realpathSync(outsideFile) };
+          }
+          return canonicalizeAcceptancePath(p, opts);
+        };
+        const result = validateAcceptancePaths({
+          root,
+          homeDir: home,
+          lstat: symlinkLstat,
+          canonicalize: symlinkCanonicalize,
+          collectTree: (r) => collectAcceptanceTreePaths(r, { lstatSync: symlinkLstat }),
+        });
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/链接/);
+      } finally {
+        symlinkSandbox.cleanup();
+      }
+    });
+
     it("受控库 sidecar 的 -wal/-shm 与 -journal 同样豁免（三后缀一致）", () => {
       // 范围正例：tokenscope/history.db-wal 与 -shm 命中受控库 sidecar 清单，
       // 与 -journal 行为一致。
