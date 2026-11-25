@@ -91,12 +91,12 @@ const good = {
   model_variants_merge_with_friendly_name: {
     model: snapshot({
       summary: {
-        groups: [{ key: "claudeopus55", label: "Synthetic Opus 5.5", requests: 6 }],
+        groups: [{ key: "claudeopus55", label: "Claude Opus 5.5", requests: 6 }],
         totals,
       },
     }),
-    visibleLabels: ["Synthetic Opus 5.5"],
-    usageText: "Synthetic Opus 5.5",
+    visibleLabels: ["Claude Opus 5.5"],
+    usageText: "Claude Opus 5.5",
   },
   model_detail_keeps_raw_names: {
     detail: snapshot({
@@ -235,6 +235,14 @@ describe("AC03 原生身份具名判定", () => {
     const evidence = structuredClone(good.project_label_is_last_segment);
     evidence.project.summary.groups.splice(1, 1);
     expect(judgeIdentity("project_label_is_last_segment", evidence).ok).toBe(false);
+  });
+  it("同末段渠道名不得覆盖发布方名称", () => {
+    // v0.9.9：真实 ID 的展示名来自随包公开规范目录（发布方名称）。
+    // 夹具里的渠道名即使与末段同形，也不能把它顶掉。
+    const evidence = structuredClone(good.model_variants_merge_with_friendly_name);
+    evidence.model.summary.groups[0].label = "Synthetic Opus 5.5";
+    evidence.visibleLabels = ["Synthetic Opus 5.5"];
+    expect(judgeIdentity("model_variants_merge_with_friendly_name", evidence).ok).toBe(false);
   });
   it("只有第二条的子目录归属，不能证明初始根仍正确", () => {
     const evidence = structuredClone(good.project_subdir_stays_in_root);

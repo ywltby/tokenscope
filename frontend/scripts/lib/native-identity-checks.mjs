@@ -105,12 +105,16 @@ export function judgeIdentity(name, evidence = {}) {
     }
     case "model_variants_merge_with_friendly_name": {
       const matches = groups(e.model).filter((group) => group.key === "claudeopus55");
+      // v0.9.9：真实 ID 由随包公开规范目录给出**发布方**名称；夹具 pricing 快照里
+      // 的渠道名 "Synthetic Opus 5.5" 属于同末段的近似名，不得覆盖它。这里同时
+      // 断言正向名称可见、渠道名不可见，比"有名字即可"更严格。
       ok =
         same(e.model) &&
         matches.length === 1 &&
         matches[0].requests === 6 &&
-        matches[0].label === "Synthetic Opus 5.5" &&
-        e.visibleLabels?.includes("Synthetic Opus 5.5") &&
+        matches[0].label === "Claude Opus 5.5" &&
+        e.visibleLabels?.includes("Claude Opus 5.5") &&
+        !e.visibleLabels?.includes("Synthetic Opus 5.5") &&
         typeof e.usageText === "string" &&
         !e.usageText.includes("claudeopus55");
       break;
