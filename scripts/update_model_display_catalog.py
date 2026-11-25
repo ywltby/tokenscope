@@ -63,9 +63,6 @@ def build(models: dict, api: dict, captured_at: str, history: dict | None = None
             if isinstance(entry, dict) and entry.get("id") and entry.get("name")
         }
     )
-    for alias, target in aliases.items():
-        if target not in canonical:
-            raise ValueError(f"历史别名目标不在最终规范清单: {alias} -> {target}")
     for provider, provider_body in api.items():
         for model_id, body in provider_body.get("models", {}).items():
             target = body.get("canonical_model_id") if isinstance(body, dict) else None
@@ -73,6 +70,9 @@ def build(models: dict, api: dict, captured_at: str, history: dict | None = None
             if not isinstance(target, str) or target not in canonical or target == own_id:
                 continue
             aliases[own_id] = target
+    for alias, target in aliases.items():
+        if target not in canonical:
+            raise ValueError(f"历史别名目标不在最终规范清单: {alias} -> {target}")
     preserved_models = sum(
         entry["id"] in canonical and canonical[entry["id"]] == entry["name"]
         for entry in (history or {}).get("models", [])

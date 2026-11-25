@@ -135,6 +135,23 @@ class BuildCatalogCase(unittest.TestCase):
             catalog,
         )
 
+    def test_current_retarget_replaces_history_before_target_validation(self):
+        catalog = build(
+            models({"id": "publisher/current", "name": "Current"}),
+            api(retired={"demo": {"canonical_model_id": "publisher/current"}}),
+            "2026-11-25",
+            {
+                "aliases": [
+                    {"id": "retired/demo", "canonical_id": "publisher/removed"}
+                ]
+            },
+        )
+        self.assertEqual(
+            catalog["aliases"],
+            [{"id": "retired/demo", "canonical_id": "publisher/current"}],
+        )
+        self.assertEqual(catalog["source"]["history"]["aliases"], 0)
+
     def test_history_layer_rejects_missing_targets_and_self_reference(self):
         for alias in [
             {"id": "retired/demo", "canonical_id": "publisher/missing"},

@@ -34,8 +34,9 @@ pub(crate) fn model_label(key: &str, representative: Option<&str>, pricing: &Pri
     }
     let rep = representative.unwrap_or(key);
     pricing
-        .own_catalog_name_for(rep)
+        .own_catalog_name_for(key)
         .or_else(|| pricing.own_catalog_name_for_group(key))
+        .or_else(|| pricing.own_catalog_name_for(rep))
         .or_else(|| pricing.display_name_for(key))
         .or_else(|| pricing.display_name_for(rep))
         .unwrap_or_else(|| rep.to_string())
@@ -975,6 +976,19 @@ mod tests {
 
     fn tz() -> TimeZone {
         TimeZone::get("Asia/Shanghai").unwrap()
+    }
+
+    #[test]
+    fn group_key_own_catalog_name_precedes_representative_name() {
+        let (pricing, _) = Pricing::load(None, None, None);
+        assert_eq!(
+            model_label(
+                "anthropic/claude-opus-4-8",
+                Some("deepseek/deepseek-v4-flash"),
+                &pricing,
+            ),
+            "Claude Opus 4.8"
+        );
     }
 
     fn event(ts: &str, model: &str, input: u64, output: u64) -> UsageEvent {
