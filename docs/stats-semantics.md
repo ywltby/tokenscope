@@ -765,7 +765,12 @@ v7 后新格式以强身份天然去重；弱记录（旧格式）沿用保守�
     唯一确认身份；若 OpenRouter 精确条目无可用名称或仅为 ID 抄写，则继续查已确认指向同一目标的
     别名；OpenRouter 的 `~` 动态路由指针仅允许完整 ID 命中，不干扰裸 ID）。严格保留渠道、
     日期、Preview、`:free` 等语义边界；若 models.dev 与 OpenRouter 对同一裸 ID 指向不同型号且
-    无显式别名确认，则保留原始 ID 并记 `conflicting_sources`。解析结果同时记录两路各自状态（`matched` / `checked_no_match` /
+    无显式别名确认，则保留原始 ID 并记 `conflicting_sources`。**弱证据例外**：OpenRouter 侧仅有
+    同末段隐式自 ID（无显式 canonical 映射）时，该命中只是「存在一个同末段渠道」，不构成身份
+    证据；随包公开目录已确认发布方身份时按该身份取名，不判跨源冲突、也不让渠道名盖掉发布方
+    规范名（原生 `ui-identity` 的 `model_variants_merge_with_friendly_name`）。若 models.dev 侧
+    也只有快照自 ID，两侧同为弱证据且指向不同目标，仍记 `conflicting_sources`；OpenRouter 有
+    显式 canonical 指向不同目标同样是真实冲突。解析结果同时记录两路各自状态（`matched` / `checked_no_match` /
     `ambiguous_or_conflict` / `unavailable_not_synced` / `unavailable_load_failed`）：
     只有两路均已加载并检查且无可信名称时才记 `no_identity_evidence` / `no_trusted_name`；
     任一路未同步、离线或加载失败而未命中时记 `source_unavailable`，不把不可用写成双源确认无名。

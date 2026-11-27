@@ -1336,3 +1336,59 @@ fn openrouter_unnamed_exact_alias_and_invalid_price_name_retention() {
     assert!(hit_cached, "应命中磁盘 PricingIndex");
     check_pricing(&p_cached, "cached");
 }
+
+/// DN-C18：随包公开目录已确认裸 ID 的发布方身份时，OpenRouter 仅同末段、
+/// 无显式 canonical 关系的渠道条目不构成跨源身份冲突，不得盖掉发布方规范名。
+/// 对应原生 ui-identity 的 `model_variants_merge_with_friendly_name`：
+/// `anthropic/claude-opus-5-5` 的发布方名必须可见，渠道名不得覆盖。
+#[test]
+fn embedded_catalog_name_wins_over_implicit_openrouter_same_leaf() {
+    let dir = tmp("embedded-vs-implicit-or");
+    // models.dev 快照沿用夹具渠道名（同末段近似名，非发布方规范名）。
+    let md = sync(
+        &dir,
+        r#"{"anthropic": {"models": {
+            "claude-opus-5.5": {"name": "Synthetic Opus 5.5", "cost": {"input": 5, "output": 25}}
+        }}}"#,
+    );
+    // OpenRouter 仅同末段、无 canonical 关系：其 ID 不是身份证据。
+    let or = sync_or(
+        &dir,
+        "openrouter.json",
+        r#"{"data": [
+            {"id": "synthetic/claude-opus-5.5", "name": "Synthetic Opus 5.5",
+             "pricing": {"prompt": "0.000006", "completion": "0.000030"}}
+        ]}"#,
+    );
+    let (p, _) = Pricing::load(None, Some(&md), Some(&or));
+
+    // 裸 ID 的公开目录身份优先；渠道同末段隐式命中不得触发 conflicting_sources。
+    let bare = p.display_name_resolution_for("claude-opus-5-5");
+    assert_eq!(
+        bare.name.as_deref(),
+        Some("Claude Opus 5.5"),
+        "发布方规范名应胜出: {bare:?}"
+    );
+    assert_ne!(bare.reason, DisplayNameReason::ConflictingSources);
+    assert_eq!(
+        p.display_name_for("claude-opus-5-5").as_deref(),
+        Some("Claude Opus 5.5")
+    );
+
+    // 完整 ID 自身规范名不变；请求明细仍保留原始 ID。
+    assert_eq!(
+        p.display_name_for("anthropic/claude-opus-5-5").as_deref(),
+        Some("Claude Opus 5.5")
+    );
+
+    // 聚合标签与图表共用同一规范名（三处同源），且身份键不变。
+    let (tz, _) = resolve_tz(None).unwrap();
+    let event = synthetic_event("claude-opus-5-5");
+    let report = aggregate(&[event], GroupBy::Model, &tz, &p).unwrap();
+    let group = report
+        .groups
+        .iter()
+        .find(|g| g.key == "claudeopus55")
+        .unwrap();
+    assert_eq!(group.label.as_deref(), Some("Claude Opus 5.5"));
+}

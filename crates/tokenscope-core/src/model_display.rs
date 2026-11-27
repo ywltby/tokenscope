@@ -254,7 +254,12 @@ enum OrBareMatch {
     Unavailable(SnapshotAvailability),
     NoMatch,
     Ambiguous,
-    Unique { target: String },
+    /// `explicit` = 该目标是否来自显式 canonical 映射。隐式自 ID 命中只说明
+    /// 「同末段有一个渠道」，不构成身份证据，不能推翻随包目录已确认的发布方身份。
+    Unique {
+        target: String,
+        explicit: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -597,6 +602,7 @@ impl NameCatalog {
             return OrBareMatch::Unavailable(self.openrouter_availability);
         }
         let mut targets: BTreeSet<String> = BTreeSet::new();
+        let mut explicit = false;
         for key in &self.openrouter_ids {
             if key.starts_with('~') {
                 continue;
@@ -604,15 +610,21 @@ impl NameCatalog {
             if ModelIdentity::parse(key).leaf_key() != leaf {
                 continue;
             }
-            let canon = self
-                .openrouter_explicit_canonical(key)
-                .unwrap_or_else(|| key.clone());
-            targets.insert(canon);
+            match self.openrouter_explicit_canonical(key) {
+                Some(canon) => {
+                    explicit = true;
+                    targets.insert(canon);
+                }
+                None => {
+                    targets.insert(key.clone());
+                }
+            }
         }
         match targets.len() {
             0 => OrBareMatch::NoMatch,
             1 => OrBareMatch::Unique {
                 target: targets.into_iter().next().unwrap(),
+                explicit,
             },
             _ => OrBareMatch::Ambiguous,
         }
@@ -856,7 +868,7 @@ impl NameCatalog {
                 OrBareMatch::Unavailable(avail) => avail.no_match_status(),
                 OrBareMatch::NoMatch => SourceLookupStatus::CheckedNoMatch,
                 OrBareMatch::Ambiguous => SourceLookupStatus::AmbiguousOrConflict,
-                OrBareMatch::Unique { target } => {
+                OrBareMatch::Unique { target, .. } => {
                     match self.choose_openrouter_name_for_target(None, target) {
                         CandidateName::Snapshot { .. } | CandidateName::Catalog { .. } => {
                             SourceLookupStatus::Matched
@@ -893,10 +905,29 @@ impl NameCatalog {
         }
 
         match (md_target, or_bare) {
-            (Some(t_md), OrBareMatch::Unique { target: t_or }) => {
+            (
+                Some(t_md),
+                OrBareMatch::Unique {
+                    target: t_or,
+                    explicit,
+                },
+            ) => {
                 if t_md != t_or {
-                    // 真实跨源冲突：models.dev 与 OpenRouter 将同一裸 ID 指向不同型号，
-                    // 且不存在显式别名确认它们为同一模型。保留原始 ID 并报告冲突原因。
+                    // OpenRouter 的隐式自 ID 命中只说明「同末段有一个渠道」，不是身份
+                    // 证据：随包公开目录已确认发布方身份时不得据此制造跨源冲突，更不得
+                    // 让渠道名盖掉发布方规范名（原生 ui-identity 契约）。
+                    // 若 models.dev 侧也只是快照自 ID，两侧同为弱证据且指向不同型号，
+                    // 仍是真实跨源冲突；显式 canonical 指向不同目标同理。
+                    if !explicit && self.embedded.canonical.contains_key(&t_md) {
+                        let md_candidate = self.choose_modelsdev_name(&t_md);
+                        let or_candidate = self.choose_openrouter_name_for_target(None, &t_md);
+                        return self.combine_same_target(
+                            &t_md,
+                            md_candidate,
+                            or_candidate,
+                            DisplayNameReason::NoTrustedName,
+                        );
+                    }
                     return DisplayNameResolution::unresolved(
                         DisplayNameReason::ConflictingSources,
                         SourceLookupStatus::AmbiguousOrConflict,
@@ -922,7 +953,7 @@ impl NameCatalog {
                     DisplayNameReason::NoTrustedName,
                 )
             }
-            (None, OrBareMatch::Unique { target: t_or }) => {
+            (None, OrBareMatch::Unique { target: t_or, .. }) => {
                 let md_candidate = self.choose_modelsdev_name(&t_or);
                 let or_candidate = self.choose_openrouter_name_for_target(None, &t_or);
                 self.combine_same_target(
