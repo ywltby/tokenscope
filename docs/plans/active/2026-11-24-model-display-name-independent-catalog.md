@@ -1,8 +1,7 @@
 # 模型展示名：独立目录查询与裸 ID 正式名
 
 - 分支：`fix/model-display-name-catalog`，基线 `origin/main` `fe07171`（v0.9.8）。
-- 状态：**实施完成，PR [#82](https://github.com/ywltby/tokenscope/pull/82) 待审查**；
-  `79ed3b7` 的必需 CI 全绿，见 §8；复核补修批次见 §9、§10、§11。
+- 状态：**已合并发布 v0.9.9**：PR [#82](https://github.com/ywltby/tokenscope/pull/82) 以 `--match-head-commit` 绑定复核 HEAD `3a6ed45`，merge commit `33b8686`；发布与核验记录见发布总账。本计划后续补修批次见 §9、§10、§11；v0.9.10 的双源展示名补修见[新计划](2026-11-27-v0910-bigint-dualname-chart.md) §3。
 - 发行版本：产品输入改动，按仓库工具取 patch **0.9.9**；视图快照 24 → 25。
 - 发布准备：上一版 `v0.9.8` 已用 `scripts/upgrade_baselines.py add` 登记，
   `check --base-ref origin/main` 通过（资产逐个下载核对哈希）。
