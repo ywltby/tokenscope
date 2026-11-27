@@ -1,9 +1,14 @@
 // 设计系统 Task 3/4：SummaryCards 指标卡——显示层断言（不重算公式）。
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import SummaryCards from "./SummaryCards.vue";
+import { DEFAULT_LOCALE, setLocale } from "../lib/i18n";
 import { TOKEN_BUCKETS } from "../lib/tokenDisplay";
 import type { Group } from "../types";
+
+afterEach(() => {
+  setLocale(DEFAULT_LOCALE);
+});
 
 // NTooltip 打桩为透传渲染（trigger + 内容同渲染），断言公式收进 tooltip。
 vi.mock("naive-ui", async (importOriginal) => {
@@ -344,5 +349,198 @@ describe("v0.9.2 费用披露进悬浮（总览卡不再常驻）", () => {
     expect(text).not.toContain("†");
     expect(text).not.toContain("部分来源记录");
     expect(text).not.toContain("其余汇总未提供费用");
+  });
+});
+
+describe("总 token 换算单位按量级进位", () => {
+  function tokenCard(w: ReturnType<typeof mountCards>) {
+    const item = w.findAll(".metric-secondary .metric-item")[0];
+    return {
+      exact: item.find(".metric-value").text(),
+      unit: item.find(".metric-unit").text(),
+    };
+  }
+
+  it("中文：小于 1 万显示 tokens，1 万起用万，达到 1 亿自动进位为亿并保留上方精确总数", () => {
+    const small = mountCards(
+      totals({ tokens: { input: 600, output: 250, cache_write: 0, cache_read: 0 } }),
+    );
+    expect(tokenCard(small)).toEqual({ exact: "850", unit: "tokens" });
+
+    const wan = mountCards(totals());
+    expect(tokenCard(wan)).toEqual({ exact: "69,000", unit: "≈ 6.90 万 tokens" });
+
+    const yi = mountCards(
+      totals({
+        tokens: {
+          input: 1_000_000_000,
+          output: 862_000_000,
+          cache_write: 2_000_000_000,
+          cache_read: 10_000_000_000,
+        },
+      }),
+    );
+    expect(tokenCard(yi)).toEqual({
+      exact: "13,862,000,000",
+      unit: "≈ 138.62 亿 tokens",
+    });
+  });
+
+  it("英文：按 K / M / B 进位，且运行期切换语言会立即同步换算单位", async () => {
+    setLocale("en-US");
+
+    const small = mountCards(
+      totals({ tokens: { input: 600, output: 250, cache_write: 0, cache_read: 0 } }),
+    );
+    expect(tokenCard(small)).toEqual({ exact: "850", unit: "tokens" });
+
+    const k = mountCards(totals());
+    expect(tokenCard(k)).toEqual({ exact: "69,000", unit: "≈ 69.00K tokens" });
+    expect(tokenCard(k).unit).not.toContain("10k");
+
+    const m = mountCards(
+      totals({
+        tokens: { input: 2_340_000, output: 1_000_000, cache_write: 0, cache_read: 9_000_000 },
+      }),
+    );
+    expect(tokenCard(m)).toEqual({ exact: "12,340,000", unit: "≈ 12.34M tokens" });
+
+    const b = mountCards(
+      totals({
+        tokens: {
+          input: 1_000_000_000,
+          output: 862_000_000,
+          cache_write: 2_000_000_000,
+          cache_read: 10_000_000_000,
+        },
+      }),
+    );
+    expect(tokenCard(b)).toEqual({ exact: "13,862,000,000", unit: "≈ 13.86B tokens" });
+
+    // 运行期切回中文，同一挂载实例立即切回「亿」且精确总数不变
+    setLocale("zh-CN");
+    await flushPromises();
+    expect(tokenCard(b)).toEqual({ exact: "13,862,000,000", unit: "≈ 138.62 亿 tokens" });
+  });
+
+  it("万亿 / T 及超大任意精度聚合总数：精确千分位、科学计数法、命中率与比例条全部无损", async () => {
+    // 1) 万亿 / T
+    const trillion = mountCards(
+      totals({
+        tokens: {
+          input: 1_000_000_000_000,
+          output: 862_000_000_000,
+          cache_write: 2_000_000_000_000,
+          cache_read: 10_000_000_000_000,
+        },
+      }),
+    );
+    expect(tokenCard(trillion)).toEqual({
+      exact: "13,862,000,000,000",
+      unit: "≈ 13.86 万亿 tokens",
+    });
+    setLocale("en-US");
+    await flushPromises();
+    expect(tokenCard(trillion)).toEqual({
+      exact: "13,862,000,000,000",
+      unit: "≈ 13.86T tokens",
+    });
+
+    // 2) 10¹⁵ 英文转上标科学计数法，中文仍显示 1000.00 万亿
+    const quadrillion = mountCards(
+      totals({
+        tokens: {
+          input: "1000000000000000",
+          output: 0,
+          cache_write: 0,
+          cache_read: 0,
+        },
+      }),
+    );
+    expect(tokenCard(quadrillion)).toEqual({
+      exact: "1,000,000,000,000,000",
+      unit: "≈ 1.00 × 10¹⁵ tokens",
+    });
+    setLocale("zh-CN");
+    await flushPromises();
+    expect(tokenCard(quadrillion)).toEqual({
+      exact: "1,000,000,000,000,000",
+      unit: "≈ 1000.00 万亿 tokens",
+    });
+
+    // 3) 超出 u64::MAX 的任意长十进制字符串（来自后端 BigUint 序列化）
+    const huge = mountCards(
+      totals({
+        tokens: {
+          input: "100000000000000000000",
+          output: "23456789012345678901",
+          cache_write: "0",
+          cache_read: "100000000000000000000",
+        },
+      }),
+    );
+    expect(tokenCard(huge)).toEqual({
+      exact: "223,456,789,012,345,678,901",
+      unit: "≈ 2.23 × 10²⁰ tokens",
+    });
+    // 命中率：10^20 / (10^20 + 10^20) = 50.0%
+    expect(huge.text()).toContain("50.0%");
+    const segs = huge.findAll(".bar-segment");
+    expect(segs.length).toBe(4);
+    expect(segs[0].attributes("style")).toContain("44.75%");
+    expect(segs[3].attributes("style")).toContain("44.75%");
+  });
+
+  it("20 位与 30 位大数自动降档字号、按逗号断行保留无空白完整文本，并支持一键复制精确整数", async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+
+    // 10 位常规数：保持 26px 默认档
+    const normal = mountCards(
+      totals({ tokens: { input: 13_861_826_426, output: 0, cache_write: 0, cache_read: 0 } }),
+    );
+    expect(normal.find(".metric-value-tokens").classes()).not.toContain("metric-value-long");
+    expect(normal.find(".metric-value-tokens").classes()).not.toContain("metric-value-xlong");
+
+    // 20 位大数（26 字符）：切换 metric-value-long 档，保留完整 title
+    const d20 = mountCards(
+      totals({
+        tokens: { input: "18446744073709551625", output: 0, cache_write: 0, cache_read: 0 },
+      }),
+    );
+    const val20 = d20.find(".metric-value-tokens");
+    expect(val20.classes()).toContain("metric-value-long");
+    expect(val20.text()).toBe("18,446,744,073,709,551,625");
+    expect(val20.attributes("title")).toBe("18,446,744,073,709,551,625");
+
+    // 30 位大数（39 字符）：切换 metric-value-xlong 档，逗号后含 wbr 断行点且文本无多余空白
+    const raw30 = "123456789012345678901234567890";
+    const d30 = mountCards(
+      totals({ tokens: { input: raw30, output: 0, cache_write: 0, cache_read: 0 } }),
+    );
+    const val30 = d30.find(".metric-value-tokens");
+    expect(val30.classes()).toContain("metric-value-xlong");
+    expect(val30.text()).toBe("123,456,789,012,345,678,901,234,567,890");
+    expect(val30.findAll("wbr").length).toBe(9);
+    expect(val30.findAll(".num-chunk").length).toBe(10);
+
+    // 点击复制按钮：写入无逗号完整精确整数并展示「已复制」反馈
+    const copyBtn = d30.find(".copy-total-btn");
+    expect(copyBtn.exists()).toBe(true);
+    expect(copyBtn.attributes("aria-label")).toBe("复制精确数值");
+    await copyBtn.trigger("click");
+    await flushPromises();
+    expect(writeText).toHaveBeenCalledWith(raw30);
+    expect(d30.find(".copy-feedback").text()).toBe("已复制");
+
+    // 切到英文：无障碍标签与反馈同步切英文
+    setLocale("en-US");
+    await flushPromises();
+    expect(copyBtn.attributes("aria-label")).toBe("Copied");
+    expect(d30.find(".copy-feedback").text()).toBe("Copied");
+    d30.unmount();
   });
 });

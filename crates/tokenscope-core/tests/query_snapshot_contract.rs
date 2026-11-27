@@ -110,7 +110,7 @@ fn paging_same_timestamp_insert_delete_keeps_snapshot_rows() {
             break;
         }
         assert_eq!(page.total, 3, "同一快照内 total 恒定");
-        seen.push(page.rows[0].input);
+        seen.push(page.rows[0].input.to_u64().unwrap());
         cursor = Some(page.rows[0].cursor.clone());
     }
     assert_eq!(
@@ -146,7 +146,7 @@ fn paging_same_timestamp_insert_delete_keeps_snapshot_rows() {
             break;
         }
         assert_eq!(page.total, 3, "旧快照不随日志变化重算");
-        seen2.push(page.rows[0].input);
+        seen2.push(page.rows[0].input.to_u64().unwrap());
         cursor = Some(page.rows[0].cursor.clone());
     }
     assert_eq!(seen2, seen, "旧 query 完整遍历与首次一致（不重不漏）");

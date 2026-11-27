@@ -248,6 +248,111 @@ describe("EventTable 表格语义（设计系统 Task 5）", () => {
     expect(vm.rowKey(r2)).toBe(r2.cursor);
   });
 
+  it("跨查询刷新：分页游标随 query_id/ridx 变化时，原生请求与 CCS 日汇总的行键保持稳定", () => {
+    const nativeQ1 = row({
+      ts: "2026-10-05 10:00:00",
+      row_id: "event:101",
+      cursor: JSON.stringify({
+        v: 2,
+        qid: "q-1",
+        mfp: "m-1",
+        dfp: "d-1",
+        ts: "2026-10-05T02:00:00Z",
+        rid: "m1",
+        seq: 0,
+      }),
+    });
+    const nativeQ2 = row({
+      ts: "2026-10-05 10:00:00",
+      row_id: "event:101",
+      cursor: JSON.stringify({
+        v: 2,
+        qid: "q-2",
+        mfp: "m-1",
+        dfp: "d-1",
+        ts: "2026-10-05T02:00:00Z",
+        rid: "m1",
+        seq: 0,
+      }),
+    });
+    const nativeSibling = row({
+      ts: "2026-10-05 10:00:00",
+      row_id: "event:102",
+      cursor: JSON.stringify({
+        v: 2,
+        qid: "q-2",
+        mfp: "m-1",
+        dfp: "d-1",
+        ts: "2026-10-05T02:00:00Z",
+        rid: "m2",
+        seq: 1,
+      }),
+    });
+    const rollupMeta = {
+      day: "2026-10-05",
+      source_tz: "Asia/Shanghai",
+      source: "ccs",
+      requests: 12,
+      label: "Claude Opus 4.7",
+      models: ["claude-opus-4-7"],
+      cost_usd: 1.5,
+      cost_detail: "rollup_only" as const,
+      unknown_pricing: false,
+      unknown_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+      cost_partially_unknown: false,
+      has_estimated_cost: true,
+      cache_write_split_estimated: false,
+      cache_price_zero_estimated: false,
+    };
+    const rollupId = `rollup:${JSON.stringify(["2026-10-05", "claudeopus47", "Asia/Shanghai", "claude-code"])}`;
+    const rollupQ1 = row({
+      ts: "2026-10-05",
+      record_id: "",
+      model: "claudeopus47",
+      row_id: rollupId,
+      cursor: JSON.stringify({
+        v: 2,
+        qid: "q-1",
+        mfp: "m-1",
+        dfp: "d-1",
+        ts: "2026-10-05",
+        rid: "",
+        seq: 0,
+        kind: "rollup",
+        ridx: 0,
+      }),
+      rollup: rollupMeta,
+    });
+    const rollupQ2 = row({
+      ts: "2026-10-05",
+      record_id: "",
+      model: "claudeopus47",
+      row_id: rollupId,
+      cursor: JSON.stringify({
+        v: 2,
+        qid: "q-2",
+        mfp: "m-1",
+        dfp: "d-1",
+        ts: "2026-10-05",
+        rid: "",
+        seq: 0,
+        kind: "rollup",
+        ridx: 3,
+      }),
+      rollup: rollupMeta,
+    });
+    const vm = mount(EventTable, {
+      props: { list: list([nativeQ1, rollupQ1], 2), filterLabel: "" },
+    }).vm as unknown as { rowKey: (r: object) => string };
+    expect(nativeQ1.cursor).not.toBe(nativeQ2.cursor);
+    expect(rollupQ1.cursor).not.toBe(rollupQ2.cursor);
+    expect(vm.rowKey(nativeQ1)).toBe("event:101");
+    expect(vm.rowKey(nativeQ2)).toBe("event:101");
+    expect(vm.rowKey(nativeSibling)).toBe("event:102");
+    expect(vm.rowKey(rollupQ1)).toBe(rollupId);
+    expect(vm.rowKey(rollupQ2)).toBe(rollupId);
+  });
+
   it("卡片化：外层 .ts-card + 卡头「请求明细」，提示行不再用 opacity 压低", () => {
     const w = mount(EventTable, { props: { list: list([row()], 1), filterLabel: "" } });
     expect(w.find("section.ts-card").exists()).toBe(true);
@@ -783,5 +888,55 @@ describe("EventTable 日汇总下钻行（v0.9.4）", () => {
     expect(renderOf(w, "agent", r)).toBe("Codex");
     expect((renderOf(w, "model", r) as VNode).children).toBe("gpt-x");
     expect(renderOf(w, "project", r)).toBe("slug");
+  });
+
+  it("single_request_beyond_js_max_safe_int_matches_between_row_and_breakdown：明细表与费用浮层保持同一精确整数", async () => {
+    const bigBd = highTierBd();
+    bigBd.basis_value = "9007199254740993";
+    bigBd.lines = [
+      {
+        kind: "input",
+        tokens: "9007199254740993",
+        unit_price: 3,
+        subtotal: 27021597.76,
+        priced: true,
+      },
+      { kind: "output", tokens: "9007199254740995", unit_price: null, subtotal: 0, priced: false },
+      { kind: "cache_write", tokens: 0, unit_price: 3.75, subtotal: 0, priced: true },
+      { kind: "cache_read", tokens: 0, unit_price: 0.3, subtotal: 0, priced: true },
+    ];
+    bigBd.complete = false;
+    bigBd.unknown = { input: 0, output: "9007199254740995", cache_write: 0, cache_read: 0 };
+
+    const r = row({
+      input: "9007199254740993",
+      output: "9007199254740995",
+      cache_write: 0,
+      cache_read: 0,
+      cost_usd: 27021597.76,
+      cost_breakdown: bigBd,
+    });
+    const w = mountWith(r);
+    expect(renderOf(w, "input", r)).toBe("9,007,199,254,740,993");
+    expect(renderOf(w, "output", r)).toBe("9,007,199,254,740,995");
+    const cell = renderOf(w, "cost_usd", r) as VNode;
+    const tip = mount(CostBreakdownTooltip, {
+      props: { ...(cell.props as Record<string, unknown>), open: true } as never,
+      attachTo: document.body,
+    });
+    try {
+      await flushPromises();
+      const body = document.querySelector(".cost-tooltip");
+      expect(body, "费用浮层内容必须挂载到文档").not.toBeNull();
+      const text = body!.textContent ?? "";
+      expect(text).toContain("9,007,199,254,740,993");
+      expect(text).toContain("9,007,199,254,740,995");
+      expect(text).not.toContain("9,007,199,254,740,992");
+      expect(text).not.toContain("9,007,199,254,740,996");
+    } finally {
+      tip.unmount();
+      w.unmount();
+      document.body.innerHTML = "";
+    }
   });
 });

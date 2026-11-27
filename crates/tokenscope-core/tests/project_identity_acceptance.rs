@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use tokenscope::aggregate::GroupBy;
-use tokenscope::model::TokenCounts;
+use tokenscope::model::BigTokenCounts;
 use tokenscope::query;
 use tokenscope::report::{EventFilter, SummaryOptions, cache_stats, summary};
 
@@ -107,13 +107,13 @@ fn rescan(o: &tokenscope::report::SummaryOptions) -> tokenscope::report::CacheIn
 
 fn snapshot_tuple(
     r: &tokenscope::report::SummaryReport,
-) -> (u64, TokenCounts, f64, bool, TokenCounts) {
+) -> (u64, BigTokenCounts, f64, bool, BigTokenCounts) {
     (
         r.totals.requests,
-        r.totals.tokens,
+        r.totals.tokens.clone(),
         r.totals.cost_usd,
         r.totals.unknown_pricing,
-        r.totals.unknown_tokens,
+        r.totals.unknown_tokens.clone(),
     )
 }
 

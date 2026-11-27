@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokenscope::aggregate::{GroupBy, aggregate, resolve_tz};
 use tokenscope::model::{AgentKind, TokenCounts, UsageEvent};
 use tokenscope::modelsdev::sync_with_body_for_tests;
-use tokenscope::pricing::{DisplayNameReason, Pricing};
+use tokenscope::openrouter::sync_with_body_for_tests as sync_openrouter_for_tests;
+use tokenscope::pricing::{DisplayNameReason, Pricing, SourceLookupStatus};
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -250,14 +251,54 @@ fn unresolved_names_record_specific_reasons() {
     let conflict = p.display_name_resolution_for("demo-conflict");
     assert_eq!(conflict.name, None);
     assert_eq!(conflict.reason, DisplayNameReason::AmbiguousIdentity);
-    let unnamed = p.display_name_resolution_for("gamma/demo-unnamed");
+    // 仅 models.dev 可用、OpenRouter 未同步：未命中时区分来源不可用，不得写成双源确认无名。
+    let unnamed_partial = p.display_name_resolution_for("gamma/demo-unnamed");
+    assert_eq!(unnamed_partial.name, None);
+    assert_eq!(unnamed_partial.reason, DisplayNameReason::SourceUnavailable);
+    assert_eq!(
+        unnamed_partial.modelsdev_status,
+        SourceLookupStatus::CheckedNoMatch
+    );
+    assert_eq!(
+        unnamed_partial.openrouter_status,
+        SourceLookupStatus::UnavailableNotSynced
+    );
+
+    // 补充已加载的 OpenRouter 快照后，双源均已检查且无名才标记 NoTrustedName / NoIdentityEvidence。
+    let or_empty = dir.join("openrouter-empty.json");
+    sync_openrouter_for_tests(&or_empty, r#"{"data":[]}"#).unwrap();
+    let (p_both, _) = Pricing::load(None, Some(&snap), Some(&or_empty));
+    let unnamed = p_both.display_name_resolution_for("gamma/demo-unnamed");
     assert_eq!(unnamed.name, None);
     assert_eq!(unnamed.reason, DisplayNameReason::NoTrustedName);
+    assert_eq!(unnamed.modelsdev_status, SourceLookupStatus::CheckedNoMatch);
+    assert_eq!(
+        unnamed.openrouter_status,
+        SourceLookupStatus::CheckedNoMatch
+    );
 
-    let (p2, _) = Pricing::load(None, None, None);
-    let missing = p2.display_name_resolution_for("totally-unknown-model");
+    let missing = p_both.display_name_resolution_for("totally-unknown-model");
     assert_eq!(missing.name, None);
     assert_eq!(missing.reason, DisplayNameReason::NoIdentityEvidence);
+    assert_eq!(missing.modelsdev_status, SourceLookupStatus::CheckedNoMatch);
+    assert_eq!(
+        missing.openrouter_status,
+        SourceLookupStatus::CheckedNoMatch
+    );
+
+    // 完全离线时两路快照均未同步：标为 SourceUnavailable，不伪装成双源确认无名。
+    let (p2, _) = Pricing::load(None, None, None);
+    let offline_missing = p2.display_name_resolution_for("totally-unknown-model");
+    assert_eq!(offline_missing.name, None);
+    assert_eq!(offline_missing.reason, DisplayNameReason::SourceUnavailable);
+    assert_eq!(
+        offline_missing.modelsdev_status,
+        SourceLookupStatus::UnavailableNotSynced
+    );
+    assert_eq!(
+        offline_missing.openrouter_status,
+        SourceLookupStatus::UnavailableNotSynced
+    );
 }
 
 /// DN-C08：公开规范目录解析时记录规范完整 ID 与数据来源。
@@ -469,14 +510,14 @@ fn weak_evidence_kimi_spot_keeps_raw_id_until_current_catalog_verifies() {
         bare_res.name, None,
         "弱证据不得用于裸 ID 取名: {bare_res:?}"
     );
-    assert_eq!(bare_res.reason, DisplayNameReason::NoIdentityEvidence);
+    assert_eq!(bare_res.reason, DisplayNameReason::SourceUnavailable);
 
     let full_res = offline.display_name_resolution_for(full_id);
     assert_eq!(
         full_res.name, None,
         "弱证据不得用于完整 ID 取名: {full_res:?}"
     );
-    assert_eq!(full_res.reason, DisplayNameReason::NoTrustedName);
+    assert_eq!(full_res.reason, DisplayNameReason::SourceUnavailable);
 
     let (tz, _) = resolve_tz(None).unwrap();
     for (raw, expected_key) in [
@@ -560,7 +601,7 @@ fn present_entry_without_usable_mapping_never_displays_old_target_offline() {
         for raw in ["relay/present-m", "Relay/Present_M", "relay/present.m"] {
             let res = p.display_name_resolution_for(raw);
             assert_eq!(res.name, None, "{raw}: {res:?}");
-            assert_eq!(res.reason, DisplayNameReason::NoTrustedName, "{raw}");
+            assert_eq!(res.reason, DisplayNameReason::SourceUnavailable, "{raw}");
             let agg = aggregate(&[synthetic_event(raw)], GroupBy::Model, &tz, &p).unwrap();
             let groups: Vec<_> = agg.groups.iter().filter(|g| g.key != "合计").collect();
             assert_eq!(groups.len(), 1);
@@ -569,7 +610,7 @@ fn present_entry_without_usable_mapping_never_displays_old_target_offline() {
         }
         let bare = p.display_name_resolution_for("present-m");
         assert_eq!(bare.name, None, "{bare:?}");
-        assert_eq!(bare.reason, DisplayNameReason::NoIdentityEvidence);
+        assert_eq!(bare.reason, DisplayNameReason::SourceUnavailable);
         // 真正退休的渠道条目与有效改指向仍照常解析。
         assert_eq!(
             p.display_name_for("retired/gone-m").as_deref(),
@@ -725,4 +766,629 @@ fn snapshot_canonical_claim_does_not_override_own_catalog_name() {
         p.display_name_for("relay/demo-pro-9").as_deref(),
         Some("Demo Pro Nine")
     );
+}
+
+fn sync_or(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let path = dir.join(name);
+    sync_openrouter_for_tests(&path, body).unwrap();
+    path
+}
+
+/// DN-OR01：双源解析全矩阵——仅 models.dev 有名、仅 OpenRouter 有名、两源一致
+/// （models.dev 优先与无名条目由 OpenRouter 补名）、两源冲突（保留原始 ID 与冲突原因）、
+/// 渠道/日期/Preview/Free 边界与双源均未命中，且不依赖条目顺序。
+#[test]
+fn dual_source_modelsdev_and_openrouter_matrix() {
+    let dir = tmp("dual-source-matrix");
+    let md_body = r#"{
+        "publisher": {"models": {
+            "md-only-1": {"name": "MD Only One", "cost": {"input": 1, "output": 2}},
+            "both-same-1": {"name": "Both Same Canonical", "cost": {"input": 1, "output": 2}},
+            "priced-no-name": {"cost": {"input": 2, "output": 4}}
+        }},
+        "zhipuai": {"models": {
+            "glm-alias-demo": {"cost": {"input": 1, "output": 2}}
+        }},
+        "openrouter": {"models": {
+            "z-ai/glm-alias-demo": {
+                "canonical_model_id": "zhipuai/glm-alias-demo",
+                "cost": {"input": 1, "output": 2}
+            }
+        }},
+        "author-a": {"models": {
+            "split-target": {"name": "Author A Split", "cost": {"input": 1, "output": 2}}
+        }}
+    }"#;
+    let or_body = r#"{"data": [
+        {"id": "publisher/both-same-1", "name": "Publisher: Both Same OR", "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+        {"id": "publisher/or-only-1", "name": "Publisher: OR Only One", "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+        {"id": "publisher/priced-no-name", "name": "Publisher: OR Supplemented", "pricing": {"prompt": "0.000002", "completion": "0.000004"}},
+        {"id": "z-ai/glm-alias-demo", "name": "Z.ai: GLM Alias Demo", "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+        {"id": "author-b/split-target", "name": "Author B Split", "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+        {"id": "publisher/or-only-1:free", "name": "Publisher: OR Only One (free)", "pricing": {"prompt": "0", "completion": "0"}}
+    ]}"#;
+    let md = sync(&dir, md_body);
+    let or = sync_or(&dir, "openrouter.json", or_body);
+
+    // 同时构造倒序快照，验证双源解析对条目顺序不敏感。
+    let md_rev = dir.join("modelsdev-rev.json");
+    let mut md_val: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&md).unwrap()).unwrap();
+    md_val["entries"].as_array_mut().unwrap().reverse();
+    std::fs::write(&md_rev, serde_json::to_vec(&md_val).unwrap()).unwrap();
+
+    let or_rev = dir.join("openrouter-rev.json");
+    let mut or_val: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&or).unwrap()).unwrap();
+    or_val["entries"].as_array_mut().unwrap().reverse();
+    std::fs::write(&or_rev, serde_json::to_vec(&or_val).unwrap()).unwrap();
+
+    for (md_path, or_path) in [(&md, &or), (&md_rev, &or_rev)] {
+        let (p, _) = Pricing::load(None, Some(md_path), Some(or_path));
+
+        // 1) 仅 models.dev 有名
+        let md_only = p.display_name_resolution_for("md-only-1");
+        assert_eq!(md_only.name.as_deref(), Some("MD Only One"));
+        assert_eq!(md_only.reason, DisplayNameReason::ResolvedSnapshot);
+        assert_eq!(md_only.modelsdev_status, SourceLookupStatus::Matched);
+        assert_eq!(
+            md_only.openrouter_status,
+            SourceLookupStatus::CheckedNoMatch
+        );
+
+        // 2) 仅 OpenRouter 有名（裸 ID、完整 ID、openrouter/ 前缀）
+        for raw in [
+            "or-only-1",
+            "publisher/or-only-1",
+            "openrouter/publisher/or-only-1",
+        ] {
+            let r = p.display_name_resolution_for(raw);
+            assert_eq!(r.name.as_deref(), Some("Publisher: OR Only One"), "{raw}");
+            assert_eq!(r.reason, DisplayNameReason::ResolvedOpenRouter, "{raw}");
+            assert_eq!(r.modelsdev_status, SourceLookupStatus::CheckedNoMatch);
+            assert_eq!(r.openrouter_status, SourceLookupStatus::Matched);
+        }
+
+        // 3) 两源一致：models.dev 规范名优先
+        let same = p.display_name_resolution_for("both-same-1");
+        assert_eq!(same.name.as_deref(), Some("Both Same Canonical"));
+        assert_eq!(same.reason, DisplayNameReason::ResolvedSnapshot);
+        assert_eq!(same.modelsdev_status, SourceLookupStatus::Matched);
+        assert_eq!(same.openrouter_status, SourceLookupStatus::Matched);
+
+        // 4) models.dev 有价格但无名称 -> OpenRouter 补名（同 ID 与显式别名）
+        for raw in ["priced-no-name", "publisher/priced-no-name"] {
+            let r = p.display_name_resolution_for(raw);
+            assert_eq!(
+                r.name.as_deref(),
+                Some("Publisher: OR Supplemented"),
+                "{raw}"
+            );
+            assert_eq!(r.reason, DisplayNameReason::ResolvedOpenRouter, "{raw}");
+        }
+        for raw in [
+            "glm-alias-demo",
+            "zhipuai/glm-alias-demo",
+            "z-ai/glm-alias-demo",
+        ] {
+            let r = p.display_name_resolution_for(raw);
+            assert_eq!(r.name.as_deref(), Some("Z.ai: GLM Alias Demo"), "{raw}");
+            assert_eq!(r.reason, DisplayNameReason::ResolvedOpenRouter, "{raw}");
+        }
+
+        // 5) 两源指向不同型号的真实冲突 -> 裸 ID 保留原文并报告冲突原因，完整 ID 各用各名
+        let conflict = p.display_name_resolution_for("split-target");
+        assert_eq!(conflict.name, None);
+        assert_eq!(conflict.reason, DisplayNameReason::ConflictingSources);
+        assert_eq!(
+            conflict.modelsdev_status,
+            SourceLookupStatus::AmbiguousOrConflict
+        );
+        assert_eq!(
+            conflict.openrouter_status,
+            SourceLookupStatus::AmbiguousOrConflict
+        );
+        assert_eq!(
+            p.display_name_for("author-a/split-target").as_deref(),
+            Some("Author A Split")
+        );
+        assert_eq!(
+            p.display_name_for("author-b/split-target").as_deref(),
+            Some("Author B Split")
+        );
+
+        // 6) 保留渠道、日期、Preview、:free 边界
+        assert_eq!(
+            p.display_name_for("or-only-1:free").as_deref(),
+            Some("Publisher: OR Only One (free)")
+        );
+        for boundary in [
+            "other-channel/or-only-1",
+            "publisher/or-only-1-preview",
+            "publisher/or-only-1-20261126",
+            "or-only-1-preview",
+            "or-only-1-20261126",
+            "publisher/md-only-1:free",
+        ] {
+            let r = p.display_name_resolution_for(boundary);
+            assert_eq!(r.name, None, "边界查询不得借名: {boundary} -> {r:?}");
+        }
+
+        // 7) 双源均已检查且未命中
+        let miss_bare = p.display_name_resolution_for("unmatched-bare-id-999");
+        assert_eq!(miss_bare.name, None);
+        assert_eq!(miss_bare.reason, DisplayNameReason::NoIdentityEvidence);
+        assert_eq!(
+            miss_bare.modelsdev_status,
+            SourceLookupStatus::CheckedNoMatch
+        );
+        assert_eq!(
+            miss_bare.openrouter_status,
+            SourceLookupStatus::CheckedNoMatch
+        );
+
+        let miss_full = p.display_name_resolution_for("unknown-ns/unmatched-model-999");
+        assert_eq!(miss_full.name, None);
+        assert_eq!(miss_full.reason, DisplayNameReason::NoTrustedName);
+        assert_eq!(
+            miss_full.modelsdev_status,
+            SourceLookupStatus::CheckedNoMatch
+        );
+        assert_eq!(
+            miss_full.openrouter_status,
+            SourceLookupStatus::CheckedNoMatch
+        );
+    }
+}
+
+/// DN-OR02：OpenRouter 无报价模型仍保留展示名，且不进入可解析报价候选（不伪造 $0）。
+#[test]
+fn openrouter_unpriced_entry_keeps_display_name_without_pricing_candidate() {
+    let dir = tmp("or-unpriced-named");
+    let md = sync(&dir, "{}");
+    let or = sync_or(
+        &dir,
+        "openrouter.json",
+        r#"{"data": [
+            {"id": "lab/no-price-or-model", "name": "Lab: No Price OR Model"},
+            {"id": "lab/null-price-or-model", "name": "Lab: Null Price OR Model", "pricing": {}}
+        ]}"#,
+    );
+    let (p, _) = Pricing::load(None, Some(&md), Some(&or));
+    assert_eq!(p.openrouter_resolvable_count(), 0);
+    let counts = TokenCounts {
+        input: 1000,
+        output: 500,
+        cache_write: 0,
+        cache_read: 0,
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
+    };
+    let at: jiff::Timestamp = "2026-11-26T00:00:00Z".parse().unwrap();
+    let (tz, _) = resolve_tz(None).unwrap();
+    for (raw, expected) in [
+        ("no-price-or-model", "Lab: No Price OR Model"),
+        ("lab/no-price-or-model", "Lab: No Price OR Model"),
+        ("null-price-or-model", "Lab: Null Price OR Model"),
+    ] {
+        let res = p.display_name_resolution_for(raw);
+        assert_eq!(res.name.as_deref(), Some(expected), "{raw}");
+        assert_eq!(res.reason, DisplayNameReason::ResolvedOpenRouter, "{raw}");
+        if let Some(est) = p.estimate(raw, &counts, at) {
+            assert_eq!(est.cost, 0.0, "{raw}");
+            assert!(!est.complete, "无报价模型不得标记为完整计价: {raw}");
+            assert_eq!(est.unknown.input, counts.input, "{raw}");
+            assert_eq!(est.unknown.output, counts.output, "{raw}");
+        }
+        let agg = aggregate(&[synthetic_event(raw)], GroupBy::Model, &tz, &p).unwrap();
+        let g = agg
+            .groups
+            .iter()
+            .find(|g| g.key != "合计")
+            .expect("应存在模型聚合组");
+        assert_eq!(g.label.as_deref(), Some(expected), "{raw}");
+        assert!(g.unknown_pricing, "{raw}");
+        assert!(!g.has_estimated_cost, "{raw}");
+    }
+}
+
+/// DN-OR03：一路未同步、读取失败或解析损坏时，严格区分「该来源不可用」与「已查且无匹配」，
+/// 不得把不可用写成双源确认无名。
+#[test]
+fn single_source_unavailable_distinguishes_not_synced_and_load_failed() {
+    let dir = tmp("source-unavailable");
+    let md = sync(
+        &dir,
+        r#"{"vendor": {"models": {"md-known": {"name": "MD Known", "cost": {"input": 1, "output": 2}}}}}"#,
+    );
+    let or = sync_or(
+        &dir,
+        "openrouter.json",
+        r#"{"data": [{"id": "vendor/or-known", "name": "Vendor: OR Known", "pricing": {"prompt": "0.000001", "completion": "0.000002"}}]}"#,
+    );
+    let corrupt = dir.join("corrupt.json");
+    std::fs::write(&corrupt, "{not valid json").unwrap();
+    let missing = dir.join("missing.json");
+
+    // 1) models.dev 已加载、OpenRouter 未同步
+    let (p1, _) = Pricing::load(None, Some(&md), Some(&missing));
+    let r1 = p1.display_name_resolution_for("missing-model-xyz");
+    assert_eq!(r1.name, None);
+    assert_eq!(r1.reason, DisplayNameReason::SourceUnavailable);
+    assert_eq!(r1.modelsdev_status, SourceLookupStatus::CheckedNoMatch);
+    assert_eq!(
+        r1.openrouter_status,
+        SourceLookupStatus::UnavailableNotSynced
+    );
+
+    // 2) models.dev 已加载、OpenRouter JSON 损坏
+    let (p2, _) = Pricing::load(None, Some(&md), Some(&corrupt));
+    let r2 = p2.display_name_resolution_for("missing-model-xyz");
+    assert_eq!(r2.name, None);
+    assert_eq!(r2.reason, DisplayNameReason::SourceUnavailable);
+    assert_eq!(r2.modelsdev_status, SourceLookupStatus::CheckedNoMatch);
+    assert_eq!(
+        r2.openrouter_status,
+        SourceLookupStatus::UnavailableLoadFailed
+    );
+
+    // 3) models.dev 未同步、OpenRouter 已加载（OpenRouter 仍能正常补名）
+    let (p3, _) = Pricing::load(None, Some(&missing), Some(&or));
+    let hit3 = p3.display_name_resolution_for("or-known");
+    assert_eq!(hit3.name.as_deref(), Some("Vendor: OR Known"));
+    assert_eq!(hit3.reason, DisplayNameReason::ResolvedOpenRouter);
+    assert_eq!(
+        hit3.modelsdev_status,
+        SourceLookupStatus::UnavailableNotSynced
+    );
+    assert_eq!(hit3.openrouter_status, SourceLookupStatus::Matched);
+    let miss3 = p3.display_name_resolution_for("missing-model-xyz");
+    assert_eq!(miss3.name, None);
+    assert_eq!(miss3.reason, DisplayNameReason::SourceUnavailable);
+    assert_eq!(
+        miss3.modelsdev_status,
+        SourceLookupStatus::UnavailableNotSynced
+    );
+    assert_eq!(miss3.openrouter_status, SourceLookupStatus::CheckedNoMatch);
+
+    // 4) 注入 I/O 读取失败（PermissionDenied）：标为 UnavailableLoadFailed
+    let deny_or = dir.join("deny-or.json");
+    let deny_or_clone = deny_or.clone();
+    let outcome = Pricing::load_outcome_with(None, Some(&md), Some(&deny_or), &move |path| {
+        if path == deny_or_clone {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected read failure",
+            ))
+        } else {
+            std::fs::read(path)
+        }
+    });
+    let r4 = outcome
+        .pricing
+        .display_name_resolution_for("missing-model-xyz");
+    assert_eq!(r4.name, None);
+    assert_eq!(r4.reason, DisplayNameReason::SourceUnavailable);
+    assert_eq!(r4.modelsdev_status, SourceLookupStatus::CheckedNoMatch);
+    assert_eq!(
+        r4.openrouter_status,
+        SourceLookupStatus::UnavailableLoadFailed
+    );
+}
+
+/// DN-OR04：复用现有同步快照——冷加载、已有 PricingIndex 恢复与 OpenRouter 同步后刷新
+/// 均正确提供双源展示名（含无报价条目）。
+#[test]
+fn dual_source_names_survive_cold_load_index_recovery_and_post_sync_refresh() {
+    let dir = tmp("dual-source-lifecycle");
+    let md = sync(
+        &dir,
+        r#"{"vendor": {"models": {"md-base": {"name": "MD Base", "cost": {"input": 1, "output": 2}}}}}"#,
+    );
+    let or = sync_or(
+        &dir,
+        "openrouter.json",
+        r#"{"data": [
+            {"id": "vendor/or-cached-1", "name": "Vendor: OR Cached One", "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+            {"id": "vendor/or-unpriced-1", "name": "Vendor: OR Unpriced One"}
+        ]}"#,
+    );
+    let idx = dir.join("pricing-index.json");
+
+    // 1) 冷加载并写出磁盘 PricingIndex
+    let (cold, _, cold_hit) = Pricing::load_cached(None, Some(&md), Some(&or), &idx);
+    assert!(!cold_hit);
+    assert_eq!(
+        cold.display_name_for("or-cached-1").as_deref(),
+        Some("Vendor: OR Cached One")
+    );
+    assert_eq!(
+        cold.display_name_for("or-unpriced-1").as_deref(),
+        Some("Vendor: OR Unpriced One")
+    );
+    assert!(idx.exists(), "应已写出磁盘价格索引");
+
+    // 2) 驱逐进程内 1 槽缓存，再按同一签名加载 -> 命中磁盘 PricingIndex 恢复路径
+    let evict_dir = dir.join("evict");
+    std::fs::create_dir_all(&evict_dir).unwrap();
+    let other_md = sync(
+        &evict_dir,
+        r#"{"other": {"models": {"evict": {"name": "Evict", "cost": {"input": 1, "output": 1}}}}}"#,
+    );
+    let other_idx = evict_dir.join("other-index.json");
+    let _ = Pricing::load_cached(None, Some(&other_md), None, &other_idx);
+
+    let (recovered, _, recovered_hit) = Pricing::load_cached(None, Some(&md), Some(&or), &idx);
+    assert!(recovered_hit, "应命中已有磁盘 PricingIndex 恢复路径");
+    assert_eq!(
+        recovered.display_name_for("md-base").as_deref(),
+        Some("MD Base")
+    );
+    assert_eq!(
+        recovered.display_name_for("or-cached-1").as_deref(),
+        Some("Vendor: OR Cached One")
+    );
+    assert_eq!(
+        recovered.display_name_for("or-unpriced-1").as_deref(),
+        Some("Vendor: OR Unpriced One")
+    );
+
+    // 3) OpenRouter 同步后刷新：快照内容变化触发重建，新模型名称立即可见
+    sync_openrouter_for_tests(
+        &or,
+        r#"{"data": [
+            {"id": "vendor/or-cached-1", "name": "Vendor: OR Cached One", "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+            {"id": "vendor/or-fresh-2", "name": "Vendor: OR Fresh Two", "pricing": {"prompt": "0.000003", "completion": "0.000006"}}
+        ]}"#,
+    )
+    .unwrap();
+    let (refreshed, _, refreshed_hit) = Pricing::load_cached(None, Some(&md), Some(&or), &idx);
+    assert!(!refreshed_hit, "同步更新快照后应重建而非复用旧索引");
+    assert_eq!(
+        refreshed.display_name_for("or-fresh-2").as_deref(),
+        Some("Vendor: OR Fresh Two")
+    );
+}
+
+/// DN-OR05：聚合层消费双源展示名，表/图/悬浮统一使用 Group.label，分组键、计价与
+/// 四桶汇总保持原口径，冲突与未命中保留原始 ID。
+#[test]
+fn dual_source_aggregation_preserves_grouping_billing_and_raw_ids() {
+    let dir = tmp("dual-source-aggregate");
+    let md = sync(
+        &dir,
+        r#"{
+            "vendor": {"models": {"priced-unnamed": {"cost": {"input": 2, "output": 4}}}},
+            "author-a": {"models": {"ambig-m": {"name": "Author A", "cost": {"input": 1, "output": 2}}}}
+        }"#,
+    );
+    let or = sync_or(
+        &dir,
+        "openrouter.json",
+        r#"{"data": [
+            {"id": "vendor/priced-unnamed", "name": "Vendor: Priced Unnamed", "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+            {"id": "vendor/or-free-name", "name": "Vendor: OR Unpriced Only"},
+            {"id": "author-b/ambig-m", "name": "Author B", "pricing": {"prompt": "0.000001", "completion": "0.000002"}}
+        ]}"#,
+    );
+    let (p, _) = Pricing::load(None, Some(&md), Some(&or));
+    let (tz, _) = resolve_tz(None).unwrap();
+    let events = vec![
+        synthetic_event("priced-unnamed"),
+        synthetic_event("or-free-name"),
+        synthetic_event("ambig-m"),
+    ];
+    let report = aggregate(&events, GroupBy::Model, &tz, &p).unwrap();
+
+    let by_key = |k: &str| {
+        report
+            .groups
+            .iter()
+            .find(|g| g.key == k)
+            .unwrap_or_else(|| panic!("缺少分组 {k}: {:?}", report.groups))
+    };
+    let g_priced = by_key("pricedunnamed");
+    assert_eq!(g_priced.label.as_deref(), Some("Vendor: Priced Unnamed"));
+    // 计价仍按 models.dev/OpenRouter 最高费用规则（input=2/M, output=4/M）：100*2e-6 + 50*4e-6 = 0.0004
+    assert!((g_priced.cost_usd - 0.0004).abs() < 1e-9);
+    assert_eq!(g_priced.tokens.input, 100);
+    assert_eq!(g_priced.tokens.output, 50);
+
+    let g_unpriced = by_key("orfreename");
+    assert_eq!(
+        g_unpriced.label.as_deref(),
+        Some("Vendor: OR Unpriced Only")
+    );
+    assert!(g_unpriced.unknown_pricing);
+    assert_eq!(g_unpriced.cost_usd, 0.0);
+
+    let g_conflict = by_key("ambigm");
+    assert_eq!(g_conflict.label.as_deref(), Some("ambig-m"));
+}
+
+/// DN-OR06：OpenRouter 复核补修回归——
+/// 1) 精确条目无名时继续查已确认别名（原 ID 与裸 ID 均命中，含磁盘索引恢复）；
+/// 2) 同步遇到非法报价（负价、非法 override、坏结构 pricing）时拒绝报价但保留有效名称。
+#[test]
+fn openrouter_unnamed_exact_alias_and_invalid_price_name_retention() {
+    let dir = tmp("openrouter-recheck-two-fixes");
+    let md = sync(
+        &dir,
+        r#"{
+            "publisher": {"models": {"recheck-model": {"cost": {"input": 1, "output": 2}}}},
+            "openrouter": {"models": {
+                "alt-org/recheck-alias": {"canonical_model_id": "publisher/recheck-model", "cost": {"input": 1, "output": 2}}
+            }}
+        }"#,
+    );
+    let or_path = dir.join("openrouter.json");
+    let or_report = sync_openrouter_for_tests(
+        &or_path,
+        r#"{"data": [
+            {"id": "publisher/recheck-model", "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+            {"id": "alt-org/recheck-alias", "name": "Recheck Good Name", "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+            {"id": "vendor/neg-priced", "name": "Vendor Neg Priced", "pricing": {"prompt": "-0.001", "completion": "0.002"}},
+            {"id": "vendor/nan-ov-priced", "name": "Vendor NaN Override", "pricing": {
+                "prompt": "0.000001", "completion": "0.000002",
+                "overrides": [{"min_prompt_tokens": 100000, "prompt": "NaN", "completion": "0.000004"}]
+            }},
+            {"id": "vendor/bad-shape-priced", "name": "Vendor Bad Shape", "pricing": "not-an-object"}
+        ]}"#,
+    )
+    .expect("同步应成功并拒绝三条非法报价");
+    // 只有合法报价的 2 条进入报价计数；三条非法报价均带告警拒绝。
+    assert_eq!(or_report.count, 2, "{:?}", or_report.warnings);
+    assert!(
+        or_report
+            .warnings
+            .iter()
+            .any(|w| w.contains("vendor/neg-priced")),
+        "{:?}",
+        or_report.warnings
+    );
+
+    let idx = dir.join("pricing-index.json");
+    let counts = TokenCounts {
+        input: 1_000,
+        output: 500,
+        cache_write: 0,
+        cache_read: 0,
+        cache_write_5m: 0,
+        cache_write_1h: 0,
+        cache_write_split_known: false,
+    };
+    let at: jiff::Timestamp = "2026-11-26T00:00:00Z".parse().unwrap();
+    let check_pricing = |p: &Pricing, phase: &str| {
+        // 1) 无名精确条目不得挡住已确认别名
+        for q in ["publisher/recheck-model", "recheck-model"] {
+            let r = p.display_name_resolution_for(q);
+            assert_eq!(
+                r.name.as_deref(),
+                Some("Recheck Good Name"),
+                "{phase} {q} -> {r:?}"
+            );
+            assert_eq!(r.reason, DisplayNameReason::ResolvedOpenRouter, "{phase}");
+        }
+        // 2) 非法报价条目的名称全部保留，但报价仍被彻底拒绝
+        for (full, bare, expected) in [
+            ("vendor/neg-priced", "neg-priced", "Vendor Neg Priced"),
+            (
+                "vendor/nan-ov-priced",
+                "nan-ov-priced",
+                "Vendor NaN Override",
+            ),
+            (
+                "vendor/bad-shape-priced",
+                "bad-shape-priced",
+                "Vendor Bad Shape",
+            ),
+        ] {
+            for q in [full, bare] {
+                let r = p.display_name_resolution_for(q);
+                assert_eq!(r.name.as_deref(), Some(expected), "{phase} {q} -> {r:?}");
+                assert_eq!(r.reason, DisplayNameReason::ResolvedOpenRouter, "{phase}");
+                assert!(
+                    p.estimate(q, &counts, at).is_none(),
+                    "{phase} 非法报价条目不得产生报价候选: {q}"
+                );
+            }
+        }
+        assert!(
+            !p.entries().iter().any(|e| {
+                e.prefix.contains("negpriced")
+                    || e.prefix.contains("nanovpriced")
+                    || e.prefix.contains("badshapepriced")
+            }),
+            "{phase} 非法报价条目不得出现在价格列表中"
+        );
+    };
+
+    // 冷加载 + 生成磁盘索引
+    let (p_cold, _, hit_cold) = Pricing::load_cached(None, Some(&md), Some(&or_path), &idx);
+    assert!(!hit_cold);
+    check_pricing(&p_cold, "cold");
+
+    // 聚合层：负价模型显示友好名、费用保持未知 0
+    let (tz, _) = resolve_tz(None).unwrap();
+    let events = vec![
+        synthetic_event("recheck-model"),
+        synthetic_event("neg-priced"),
+    ];
+    let report = aggregate(&events, GroupBy::Model, &tz, &p_cold).unwrap();
+    let g_recheck = report
+        .groups
+        .iter()
+        .find(|g| g.key == "recheckmodel")
+        .unwrap();
+    assert_eq!(g_recheck.label.as_deref(), Some("Recheck Good Name"));
+    let g_neg = report.groups.iter().find(|g| g.key == "negpriced").unwrap();
+    assert_eq!(g_neg.label.as_deref(), Some("Vendor Neg Priced"));
+    assert!(g_neg.unknown_pricing);
+    assert!(!g_neg.has_estimated_cost);
+    assert_eq!(g_neg.cost_usd, 0.0);
+
+    // 驱逐内存缓存后经已有磁盘 PricingIndex 恢复
+    let evict = dir.join("evict");
+    std::fs::create_dir_all(&evict).unwrap();
+    let _ = Pricing::load_cached(None, None, None, &evict.join("evict.json"));
+    let (p_cached, _, hit_cached) = Pricing::load_cached(None, Some(&md), Some(&or_path), &idx);
+    assert!(hit_cached, "应命中磁盘 PricingIndex");
+    check_pricing(&p_cached, "cached");
+}
+
+/// DN-C18：随包公开目录已确认裸 ID 的发布方身份时，OpenRouter 仅同末段、
+/// 无显式 canonical 关系的渠道条目不构成跨源身份冲突，不得盖掉发布方规范名。
+/// 对应原生 ui-identity 的 `model_variants_merge_with_friendly_name`：
+/// `anthropic/claude-opus-5-5` 的发布方名必须可见，渠道名不得覆盖。
+#[test]
+fn embedded_catalog_name_wins_over_implicit_openrouter_same_leaf() {
+    let dir = tmp("embedded-vs-implicit-or");
+    // models.dev 快照沿用夹具渠道名（同末段近似名，非发布方规范名）。
+    let md = sync(
+        &dir,
+        r#"{"anthropic": {"models": {
+            "claude-opus-5.5": {"name": "Synthetic Opus 5.5", "cost": {"input": 5, "output": 25}}
+        }}}"#,
+    );
+    // OpenRouter 仅同末段、无 canonical 关系：其 ID 不是身份证据。
+    let or = sync_or(
+        &dir,
+        "openrouter.json",
+        r#"{"data": [
+            {"id": "synthetic/claude-opus-5.5", "name": "Synthetic Opus 5.5",
+             "pricing": {"prompt": "0.000006", "completion": "0.000030"}}
+        ]}"#,
+    );
+    let (p, _) = Pricing::load(None, Some(&md), Some(&or));
+
+    // 裸 ID 的公开目录身份优先；渠道同末段隐式命中不得触发 conflicting_sources。
+    let bare = p.display_name_resolution_for("claude-opus-5-5");
+    assert_eq!(
+        bare.name.as_deref(),
+        Some("Claude Opus 5.5"),
+        "发布方规范名应胜出: {bare:?}"
+    );
+    assert_ne!(bare.reason, DisplayNameReason::ConflictingSources);
+    assert_eq!(
+        p.display_name_for("claude-opus-5-5").as_deref(),
+        Some("Claude Opus 5.5")
+    );
+
+    // 完整 ID 自身规范名不变；请求明细仍保留原始 ID。
+    assert_eq!(
+        p.display_name_for("anthropic/claude-opus-5-5").as_deref(),
+        Some("Claude Opus 5.5")
+    );
+
+    // 聚合标签与图表共用同一规范名（三处同源），且身份键不变。
+    let (tz, _) = resolve_tz(None).unwrap();
+    let event = synthetic_event("claude-opus-5-5");
+    let report = aggregate(&[event], GroupBy::Model, &tz, &p).unwrap();
+    let group = report
+        .groups
+        .iter()
+        .find(|g| g.key == "claudeopus55")
+        .unwrap();
+    assert_eq!(group.label.as_deref(), Some("Claude Opus 5.5"));
 }

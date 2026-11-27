@@ -170,9 +170,9 @@ fn reconcile(group: &Group, rows: &[EventRow]) {
         let count = row.rollup.as_ref().map_or(1, |rollup| rollup.requests);
         for (sum, bucket) in
             t.iter_mut()
-                .zip([row.input, row.output, row.cache_write, row.cache_read])
+                .zip([&row.input, &row.output, &row.cache_write, &row.cache_read])
         {
-            *sum += bucket;
+            *sum += bucket.to_u64().unwrap();
         }
         (n + count, t, fees + row.cost_usd.unwrap_or(0.0))
     });
@@ -182,14 +182,12 @@ fn reconcile(group: &Group, rows: &[EventRow]) {
 }
 
 fn group_tokens(group: &Group) -> [u64; 4] {
-    let TokenCounts {
-        input,
-        output,
-        cache_write,
-        cache_read,
-        ..
-    } = group.tokens;
-    [input, output, cache_write, cache_read]
+    [
+        group.tokens.input.to_u64().unwrap(),
+        group.tokens.output.to_u64().unwrap(),
+        group.tokens.cache_write.to_u64().unwrap(),
+        group.tokens.cache_read.to_u64().unwrap(),
+    ]
 }
 
 /// v0.9.8（DN）：302ai 的 ID 抄写在目录里排前，也不得盖掉聚合表、图表与

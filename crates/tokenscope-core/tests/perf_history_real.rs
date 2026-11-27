@@ -1203,10 +1203,10 @@ fn measure_real_round(label: &str, opts: &SummaryOptions) -> RealRound {
         query::query_summary(&snap.query_id).unwrap_or_else(|e| panic!("{label} 汇总失败: {e}"));
     r.summary_ms = t.elapsed().as_millis();
     r.requests = sum.totals.requests;
-    r.input = sum.totals.tokens.input;
-    r.output = sum.totals.tokens.output;
-    r.cache_write = sum.totals.tokens.cache_write;
-    r.cache_read = sum.totals.tokens.cache_read;
+    r.input = sum.totals.tokens.input.to_u64().unwrap();
+    r.output = sum.totals.tokens.output.to_u64().unwrap();
+    r.cache_write = sum.totals.tokens.cache_write.to_u64().unwrap();
+    r.cache_read = sum.totals.tokens.cache_read.to_u64().unwrap();
     r.cost_usd = sum.totals.cost_usd;
     for s in &sum.sources {
         r.files_scanned += s.stats.files_scanned;

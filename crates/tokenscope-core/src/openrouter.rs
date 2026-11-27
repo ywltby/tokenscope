@@ -125,6 +125,15 @@ pub struct SnapshotEntry {
     pub overrides: Vec<SnapshotOverride>,
 }
 
+/// 报价被拒绝（非法单价或价格结构异常）的模型名称元数据：保留展示名证据，
+/// 但不进入报价候选，也不计入 `SyncReport.count`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotNameEntry {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     /// 快照格式版本：v2 起带条件价格档（overrides）；旧快照缺 v 字段
@@ -133,6 +142,9 @@ pub struct Snapshot {
     pub v: u8,
     pub synced_at: String,
     pub entries: Vec<SnapshotEntry>,
+    /// 报价被拒绝但仍具备有效模型标识/名称的条目；旧快照缺省为空，不进入报价候选。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<SnapshotNameEntry>,
 }
 
 fn default_snapshot_v1() -> u8 {
@@ -251,14 +263,25 @@ pub(crate) fn sync_with(
     let mut warnings: Vec<String> = Vec::new();
     let mut diagnostics: Vec<crate::sync_diag::SyncWarning> = Vec::new();
     let mut entries: Vec<SnapshotEntry> = Vec::new();
+    let mut names: Vec<SnapshotNameEntry> = Vec::new();
     for (index, item) in body.data.into_iter().enumerate() {
         // OR03：结构无法解析的模型只跳过它自己；取得到字符串 id 就用 id
-        // 标识，否则用数组序号。
+        // 标识，否则用数组序号。若仅 pricing 结构异常但 id 与 name 合法，
+        // 名称元数据与报价校验解耦保留到 names，不进入报价候选。
         let m = match item {
             ApiEntry::Model(m) => m,
-            ApiEntry::Invalid { id, reason } => {
+            ApiEntry::Invalid { id, name, reason } => {
                 rejected += 1;
                 malformed += 1;
+                if let (Some(valid_id), Some(valid_name)) = (
+                    id.as_deref().filter(|s| !s.trim().is_empty()),
+                    name.as_deref().filter(|s| !s.trim().is_empty()),
+                ) {
+                    names.push(SnapshotNameEntry {
+                        id: valid_id.to_string(),
+                        name: Some(valid_name.to_string()),
+                    });
+                }
                 let label = id.unwrap_or_else(|| format!("#{index}"));
                 push_warning(
                     &mut warnings,
@@ -304,6 +327,13 @@ pub(crate) fn sync_with(
         }
         if !invalid.is_empty() {
             rejected += 1;
+            // 报价继续整条拒绝，但名称元数据与报价校验解耦，单独保留到 names 供展示名解析使用。
+            if !m.id.trim().is_empty() {
+                names.push(SnapshotNameEntry {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                });
+            }
             push_warning(
                 &mut warnings,
                 &mut diagnostics,
@@ -401,6 +431,12 @@ pub(crate) fn sync_with(
             Ok(e) => entries.push(e),
             Err(reason) => {
                 rejected += 1;
+                if !m.id.trim().is_empty() {
+                    names.push(SnapshotNameEntry {
+                        id: m.id.clone(),
+                        name: m.name.clone(),
+                    });
+                }
                 push_warning(
                     &mut warnings,
                     &mut diagnostics,
@@ -418,6 +454,15 @@ pub(crate) fn sync_with(
     }
     entries.sort_by(|a, b| a.id.cmp(&b.id));
     entries.dedup_by(|a, b| a.id == b.id);
+    let priced_ids: std::collections::HashSet<&str> =
+        entries.iter().map(|e| e.id.as_str()).collect();
+    names.retain(|n| !priced_ids.contains(n.id.as_str()));
+    names.sort_by(|a, b| {
+        a.id.cmp(&b.id)
+            .then_with(|| a.name.is_none().cmp(&b.name.is_none()))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    names.dedup_by(|a, b| a.id == b.id);
 
     let synced_at = jiff::Zoned::now().to_string();
     let count = entries.len() as u64;
@@ -425,6 +470,7 @@ pub(crate) fn sync_with(
         v: 2,
         synced_at: synced_at.clone(),
         entries,
+        names,
     };
     if let Some(dir) = snapshot_path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("创建目录失败: {}", dir.display()))?;
@@ -463,9 +509,10 @@ pub fn sync_with_body_for_tests(snapshot_path: &Path, body: &str) -> Result<Sync
 #[derive(Debug)]
 pub(crate) enum ApiEntry {
     Model(ApiModel),
-    /// 原始 `id`（是字符串时）与解析错误，用于 warning。
+    /// 原始 `id`/`name`（是字符串时）与解析错误，用于 warning 与名称元数据保留。
     Invalid {
         id: Option<String>,
+        name: Option<String>,
         reason: String,
     },
 }
@@ -477,10 +524,15 @@ impl<'de> Deserialize<'de> for ApiEntry {
             .get("id")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
+        let name = raw
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         Ok(match serde_json::from_value::<ApiModel>(raw) {
             Ok(model) => ApiEntry::Model(model),
             Err(e) => ApiEntry::Invalid {
                 id,
+                name,
                 reason: e.to_string(),
             },
         })
@@ -515,7 +567,7 @@ mod tests {
         fn model(&self) -> &ApiModel {
             match self {
                 ApiEntry::Model(m) => m,
-                ApiEntry::Invalid { id, reason } => panic!("模型结构异常 {id:?}: {reason}"),
+                ApiEntry::Invalid { id, reason, .. } => panic!("模型结构异常 {id:?}: {reason}"),
             }
         }
     }
@@ -1146,6 +1198,7 @@ mod tests {
                 cache_write: Some(0.0),
                 overrides: Vec::new(),
             }],
+            names: Vec::new(),
         };
         std::fs::write(&path, serde_json::to_string_pretty(&snapshot).unwrap()).unwrap();
         let loaded = load_snapshot(&path).unwrap().unwrap();
@@ -1330,8 +1383,10 @@ mod tests {
         format!("{}SYNCED_AT{}", &text[..start], &text[end..]).into_bytes()
     }
 
-    /// 不变量 7：同一份上游响应，改造前后快照逐字节相同（synced_at 除外）；
-    /// `SyncReport.warnings` 的字符串内容与顺序也不变。
+    /// 不变量 7：同一份上游响应，报价条目区（v/synced_at/entries）与改造前
+    /// golden 基准逐字节相同，`SyncReport.warnings` 的字符串内容与顺序不变；
+    /// 同时，负价被拒模型 `prov/neg` 的有效名称保留在独立的 `names` 元数据区，
+    /// 不进入报价 `entries`。
     #[test]
     fn golden_snapshot_bytes_and_warnings_unchanged() {
         let dir = std::env::temp_dir().join(format!("tokenscope-golden-or-{}", std::process::id()));
@@ -1339,14 +1394,24 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("pricing-openrouter.json");
         let report = sync_with_body_for_tests(&path, &golden_body()).unwrap();
-        assert_eq!(report.count, 4, "ok/timed/dup/zero 四个模型入快照");
-        let actual = normalize_synced_at(&std::fs::read(&path).unwrap());
+        assert_eq!(report.count, 4, "ok/timed/dup/zero 四个模型入报价快照");
+        let mut parsed = load_snapshot(&path).unwrap().unwrap();
+        assert_eq!(
+            parsed.names.len(),
+            1,
+            "仅负价但 id/name 合法的 prov/neg 进入 names"
+        );
+        assert_eq!(parsed.names[0].id, "prov/neg");
+        assert_eq!(parsed.names[0].name.as_deref(), Some("Neg"));
+        parsed.names.clear();
+        let pricing_only = serde_json::to_string_pretty(&parsed).unwrap();
+        let actual = normalize_synced_at(pricing_only.as_bytes());
         let expected = std::fs::read("tests/fixtures/openrouter/snapshot-golden.json")
             .expect("golden 基准 fixture 缺失");
         assert_eq!(
             String::from_utf8_lossy(&actual),
             String::from_utf8_lossy(&expected),
-            "快照字节与改造前基准不一致"
+            "报价快照区字节与改造前基准不一致"
         );
         // warnings 字符串内容与顺序保持不变（4 条：时间条件/重复阈值/非法单价/结构异常）。
         let warnings: Vec<&str> = report.warnings.iter().map(String::as_str).collect();
@@ -1411,6 +1476,63 @@ mod tests {
             "{:?}",
             report.diagnostics[2]
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn invalid_price_rejects_pricing_but_preserves_display_name() {
+        let dir = numeric_dir("invalid-price-keep-name");
+        let path = dir.join("pricing-openrouter.json");
+        let body = r#"{"data":[
+            {"id":"prov/neg-named","name":"Neg Formal Model","pricing":{"prompt":"-0.001","completion":"0.002"}},
+            {"id":"prov/nan-ov-named","name":"NaN Override Model","pricing":{
+                "prompt":"0.000001","completion":"0.000002",
+                "overrides":[{"min_prompt_tokens":100000,"prompt":"NaN","completion":"0.000004"}]
+            }},
+            {"id":"prov/bad-shape-named","name":"Bad Shape Model","pricing":"not-an-object"},
+            {"id":"prov/good","name":"Good Model","pricing":{"prompt":"0.000001","completion":"0.000002"}}
+        ]}"#;
+        let report = sync_with_body_for_tests(&path, body).unwrap();
+        assert_eq!(report.count, 1, "非法报价全部拒绝，仅合法条目计入报价数");
+        assert_eq!(report.warnings.len(), 3, "{:?}", report.warnings);
+
+        let snap = load_snapshot(&path).unwrap().unwrap();
+        assert_eq!(snap.entries.len(), 1);
+        assert_eq!(snap.entries[0].id, "prov/good");
+        let kept: Vec<(&str, Option<&str>)> = snap
+            .names
+            .iter()
+            .map(|e| (e.id.as_str(), e.name.as_deref()))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![
+                ("prov/bad-shape-named", Some("Bad Shape Model")),
+                ("prov/nan-ov-named", Some("NaN Override Model")),
+                ("prov/neg-named", Some("Neg Formal Model")),
+            ]
+        );
+
+        let (pricing, warnings) = crate::pricing::Pricing::load(None, None, Some(&path));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(pricing.openrouter_resolvable_count(), 1);
+        for (full, bare, expected) in [
+            ("prov/neg-named", "neg-named", "Neg Formal Model"),
+            ("prov/nan-ov-named", "nan-ov-named", "NaN Override Model"),
+            ("prov/bad-shape-named", "bad-shape-named", "Bad Shape Model"),
+        ] {
+            for q in [full, bare] {
+                assert_eq!(
+                    pricing.display_name_for(q).as_deref(),
+                    Some(expected),
+                    "{q}"
+                );
+                assert!(
+                    pricing.lookup(q).is_none(),
+                    "非法报价条目不得进入计价表: {q}"
+                );
+            }
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -68,6 +68,8 @@ const {
   noticeHeadline,
   moreBlockedHint,
   drillLabel,
+  summaryResetKey,
+  eventsResetKey,
   // 动作
   refresh,
   manualRefresh,
@@ -211,6 +213,8 @@ defineExpose({
   noticeHeadline,
   moreBlockedHint,
   drillLabel,
+  summaryResetKey,
+  eventsResetKey,
   refresh,
   manualRefresh,
   startRefreshBatch,
@@ -423,12 +427,14 @@ defineExpose({
           </div>
           <UsageTable
             :report="report"
+            :reset-key="summaryResetKey"
             @row-click="onSummaryRowClick"
             @total-row="onTotalRowClick"
           />
           <EventTable
             v-if="events"
             :list="events"
+            :reset-key="eventsResetKey"
             :filter-label="drill ? drillLabel(drill) : ''"
             :filter-closable="!!drill"
             :more="hasMore"

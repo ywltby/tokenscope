@@ -1768,7 +1768,9 @@ const IMPL = {
           `${dimension}标题与自适应尺寸`,
           (await page.locator(".chart-title").textContent()) === title &&
             metrics.scrollWidth <= metrics.width + 1 &&
-            (dimension === "按模型" ? metrics.height >= 30 * 24 + 80 : metrics.height <= 500) &&
+            (dimension === "按模型" || dimension === "按项目"
+              ? metrics.height >= 30 * 24 + 80
+              : metrics.height <= 500) &&
             metrics.scrollHeight <= metrics.height + 1,
           JSON.stringify(metrics),
         );

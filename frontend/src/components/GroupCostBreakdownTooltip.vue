@@ -21,7 +21,8 @@
 import { computed, h, onBeforeUnmount, onMounted, ref, useId } from "vue";
 import { NTooltip } from "naive-ui";
 import { formatMoney } from "../lib/formatMoney";
-import { costDisplayTone } from "../lib/costDisplay";
+import { costDisplayTone, unknownTokenTotal } from "../lib/costDisplay";
+import { toTokenBigInt } from "../lib/tokenUsage";
 import { t } from "../lib/translate";
 import type { Group, TokenCounts } from "../types";
 
@@ -78,32 +79,19 @@ const estimateText = computed(() => formatMoney(g.value.cost_usd, "summary"));
 const hasSource = computed(() => g.value.source_cost_usd != null);
 const sourceText = computed(() => formatMoney(g.value.source_cost_usd ?? 0, "summary"));
 const sourcePartial = computed(() => g.value.source_cost_state === "partial");
-const hasUnknown = computed(
-  () =>
-    g.value.unknown_tokens.input +
-      g.value.unknown_tokens.output +
-      g.value.unknown_tokens.cache_write +
-      g.value.unknown_tokens.cache_read >
-    0,
-);
-const unknownTotal = computed(
-  () =>
-    g.value.unknown_tokens.input +
-    g.value.unknown_tokens.output +
-    g.value.unknown_tokens.cache_write +
-    g.value.unknown_tokens.cache_read,
-);
+const unknownTotal = computed(() => unknownTokenTotal(g.value.unknown_tokens));
+const hasUnknown = computed(() => unknownTotal.value > 0n);
 const unknownParts = computed(() => {
   const u: TokenCounts = g.value.unknown_tokens;
-  const rows: { label: string; n: number }[] = [];
+  const rows: { label: string; n: bigint }[] = [];
   for (const [key, label] of [
     ["input", t("dashboard.colInput")],
     ["output", t("dashboard.colOutput")],
     ["cache_write", t("dashboard.colCacheWrite")],
     ["cache_read", t("dashboard.colCacheRead")],
   ] as const) {
-    const n = u[key];
-    if (n > 0) rows.push({ label, n });
+    const n = toTokenBigInt(u[key]);
+    if (n > 0n) rows.push({ label, n });
   }
   return rows;
 });
@@ -295,10 +283,15 @@ function renderContent(): ReturnType<typeof h> {
 }
 .gcb-label {
   color: var(--ts-text-secondary);
+  flex-shrink: 0;
 }
-.gcb-amount {
+.gcb-body .gcb-amount {
   color: var(--ts-text);
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: right;
+  min-width: 0;
+  max-width: 100%;
 }
 .gcb-note {
   font-size: 12px;

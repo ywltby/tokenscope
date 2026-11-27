@@ -36,6 +36,7 @@ import {
 } from "../lib/rangePreset";
 import { SNAPSHOT_VERSION, enqueueSnapshotSave } from "../lib/viewSnapshot";
 import { errorText, isQueryExpired } from "../lib/queryError";
+import { totalTokens } from "../lib/tokenUsage";
 import {
   loadViewFilterState,
   normalizeDrill,
@@ -196,6 +197,34 @@ function dayInTz(iso: string | null | undefined, tz: string): string | null {
   return tzDate(ms, tz);
 }
 
+/** 聚合表滚动重置身份：维度、来源、时间预设、日粒度参与方式与统计时区（不含下钻）。 */
+function formatSummaryResetKey(
+  by: Dim,
+  agent: AgentFilter,
+  preset: RangePreset | null,
+  rollupsMode: RollupsMode,
+  timezone: string,
+): string {
+  return JSON.stringify([by, agent, presetKey(preset), rollupsMode, timezone]);
+}
+
+/** 请求明细滚动重置身份：来源、时间预设、日粒度参与方式、统计时区与下钻筛选（不含聚合维度）。 */
+function formatEventsResetKey(
+  agent: AgentFilter,
+  preset: RangePreset | null,
+  rollupsMode: RollupsMode,
+  timezone: string,
+  drill: EventDrill | null,
+): string {
+  return JSON.stringify([
+    agent,
+    presetKey(preset),
+    rollupsMode,
+    timezone,
+    drill ? [drill.type, drill.key] : null,
+  ]);
+}
+
 export function useUsageQuery(opts: UsageQueryOptions) {
   // ── 筛选偏好（决定"查什么"）────────────────────────────────
   const initialState = loadViewFilterState();
@@ -226,6 +255,27 @@ export function useUsageQuery(opts: UsageQueryOptions) {
   const cachedAt = ref<string | null>(null);
   const currentQuery = ref<QueryHandle | null>(null);
   const displayedQuery = ref<QueryHandle | null>(null);
+  /// 当前已展示批次各自对应的稳定筛选身份：同筛选下后台/手动刷新不变化，
+  /// 切换维度（聚合表）、来源/时间范围/日粒度/时区（双表）或下钻（明细表）时
+  /// 随批次提交原子切换，驱动对应 ScrollList 回顶部。
+  const summaryResetKey = ref<string>(
+    formatSummaryResetKey(
+      initial.by,
+      initial.agent,
+      initial.preset,
+      initial.rollupsMode,
+      resolvedTzId(tz.value),
+    ),
+  );
+  const eventsResetKey = ref<string>(
+    formatEventsResetKey(
+      initial.agent,
+      initial.preset,
+      initial.rollupsMode,
+      resolvedTzId(tz.value),
+      initial.drill,
+    ),
+  );
   // 新批次两侧先暂存，展示结果只在同一会话齐备后一起替换。
   let stagedReport: SummaryReport | null = null;
   let stagedEvents: EventList | null = null;
@@ -237,6 +287,23 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       stagedReport.pricing_revision !== stagedEvents.pricing_revision
     )
       return;
+    const sk = summaryKey ?? mainIdentity();
+    const ek = eventsKey.value ?? eventIdentity();
+    const resolvedTz = currentQuery.value.timezone || resolvedTzId(tz.value);
+    summaryResetKey.value = formatSummaryResetKey(
+      sk.by,
+      sk.agent,
+      sk.preset,
+      batchRollups,
+      resolvedTz,
+    );
+    eventsResetKey.value = formatEventsResetKey(
+      ek.agent,
+      ek.preset,
+      batchRollups,
+      resolvedTz,
+      ek.drill,
+    );
     report.value = stagedReport;
     events.value = stagedEvents;
     displayedQuery.value = currentQuery.value;
@@ -936,7 +1003,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     const covered = report.value?.rollup_coverage?.covered_buckets ?? 0;
     const coveredTokens = (() => {
       const t = report.value?.rollup_coverage?.covered_detail_tokens;
-      return t ? t.input + t.output + t.cache_write + t.cache_read : 0;
+      return t ? totalTokens(t) : 0n;
     })();
     // 统计来源选择依据（A 类）与交叉冲突（C 类）：都是**统计口径**，
     // 不参与 `clean` 判定，也不计入采集警告计数。
@@ -1076,7 +1143,7 @@ export function useUsageQuery(opts: UsageQueryOptions) {
         severity: "info",
         text: t("dashboard.rollupCovered", {
           count: collectionDiagnostics.value.covered,
-          tokens: collectionDiagnostics.value.coveredTokens,
+          tokens: collectionDiagnostics.value.coveredTokens.toString(),
         }),
         // 依据放在可展开的统计说明里，不在通知条上堆大段文字。
         details: [t("dashboard.selectionBasisRollup")],
@@ -1478,6 +1545,20 @@ export function useUsageQuery(opts: UsageQueryOptions) {
       // 快照的统计时区取自它的 report（v12 起 filters 不再保存时区）。
       if (!viewFiltersEqual(restored, preferenceSnapshot())) return;
       if (!cached.report.timezone || cached.report.timezone !== resolvedTzId(tz.value)) return;
+      summaryResetKey.value = formatSummaryResetKey(
+        restored.by,
+        restored.agent,
+        restored.preset,
+        restored.rollupsMode,
+        cached.report.timezone,
+      );
+      eventsResetKey.value = formatEventsResetKey(
+        restored.agent,
+        restored.preset,
+        restored.rollupsMode,
+        cached.report.timezone,
+        restored.drill,
+      );
       report.value = cached.report;
       events.value = cached.events ?? null;
       batchRange.value = cached.report.range ?? null;
@@ -1540,6 +1621,8 @@ export function useUsageQuery(opts: UsageQueryOptions) {
     noticeHeadline,
     moreBlockedHint,
     drillLabel,
+    summaryResetKey,
+    eventsResetKey,
     // 动作
     refresh,
     manualRefresh,

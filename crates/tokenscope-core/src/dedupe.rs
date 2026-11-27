@@ -217,7 +217,7 @@ impl StrongUpsert<'_> {
 /// 同刻候选的确定性代表/// 同刻候选的确定性代表：四桶总量更大者胜；总量并列取 `(source_path, line)`
 /// 更大者（与历史库来源键 `native|app|路径|行序|指纹` 的字典序一致）。
 fn same_instant_rep_wins(cand: &UsageEvent, best: &UsageEvent) -> bool {
-    let (c_total, b_total) = (cand.total_tokens(), best.total_tokens());
+    let (c_total, b_total) = (cand.total_tokens_u128(), best.total_tokens_u128());
     if c_total != b_total {
         return c_total > b_total;
     }

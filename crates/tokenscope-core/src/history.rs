@@ -26,7 +26,8 @@ use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 
-use crate::model::{AgentKind, TokenCounts};
+use crate::bigint::BigUint;
+use crate::model::{AgentKind, BigTokenCounts, TokenCounts};
 use crate::retry::HISTORY_BUSY_TIMEOUT;
 
 /// 当前库结构版本（`PRAGMA user_version`）。
@@ -487,7 +488,7 @@ pub struct EventWrite {
 }
 
 /// 批次写入结果（逐类计数，与计划 §7 H05 的预览/审计口径一致）。
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct WriteSummary {
     /// 新插入的事件数。
     pub inserted: u64,
@@ -510,8 +511,8 @@ pub struct WriteSummary {
     /// 新增的来源证据行数。
     pub origins_added: u64,
     /// **本批插入**事件的四桶之和：只给已有事件补来源证据时保持 0
-    ///（净新增用量必须按真正新增的事实统计）。
-    pub inserted_tokens: TokenCounts,
+    ///（净新增用量必须按真正新增的事实统计；采用任意精度 BigTokenCounts，永不溢出）。
+    pub inserted_tokens: BigTokenCounts,
 }
 
 impl WriteSummary {
@@ -522,7 +523,7 @@ impl WriteSummary {
 }
 
 /// 原生采集结果：升级纠正的诊断只存在于本轮，不写入持久计数或查询 DTO。
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CollectedWriteSummary {
     pub events: WriteSummary,
     pub models_corrected: u64,
@@ -624,7 +625,7 @@ pub struct ImportRunRecord {
 }
 
 /// 导入批次结果。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ImportOutcome {
     pub run_id: i64,
     pub events: WriteSummary,
@@ -1668,11 +1669,10 @@ impl HistoryDb {
                     generation,
                     allow_correction,
                 )?;
-                result.events.inserted_tokens = result
+                result
                     .events
                     .inserted_tokens
-                    .checked_add(&summary.inserted_tokens)
-                    .ok_or_else(|| anyhow!("本批新增用量累计溢出可表示范围"))?;
+                    .add_big(&summary.inserted_tokens);
                 result.events.inserted += summary.inserted;
                 result.events.updated += summary.updated;
                 result.events.unchanged += summary.unchanged;
@@ -1777,12 +1777,11 @@ impl HistoryDb {
                 generation,
                 allow_correction,
             )?;
-            // 分项复用原内核，批次累计仍受检；溢出时包含此前纠正在内全部回滚。
-            result.events.inserted_tokens = result
+            // 分项复用原内核，批次累计采用任意精度 BigTokenCounts，永不溢出。
+            result
                 .events
                 .inserted_tokens
-                .checked_add(&summary.inserted_tokens)
-                .ok_or_else(|| anyhow!("本批新增用量累计溢出可表示范围"))?;
+                .add_big(&summary.inserted_tokens);
             result.events.inserted += summary.inserted;
             result.events.updated += summary.updated;
             result.events.unchanged += summary.unchanged;
@@ -2057,21 +2056,21 @@ impl HistoryDb {
         })
     }
 
-    /// 导入批次的净新增用量（读审计行；提交时按**本批插入**的事件写入）。
-    pub fn import_run_net_tokens(&self, run_id: i64) -> Result<TokenCounts> {
+    /// 导入批次的净新增用量（读审计行；提交时按**本批插入**的事件写入，支持任意精度）。
+    pub fn import_run_net_tokens(&self, run_id: i64) -> Result<BigTokenCounts> {
         let (i, o, cw, cr): (String, String, String, String) = self.conn.query_row(
             "SELECT net_input_tokens, net_output_tokens, net_cache_write_tokens,
                     net_cache_read_tokens FROM import_runs WHERE id = ?1",
             params![run_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
-        Ok(TokenCounts {
-            input: parse_u64_text(&i, "net_input_tokens")?,
-            output: parse_u64_text(&o, "net_output_tokens")?,
-            cache_write: parse_u64_text(&cw, "net_cache_write_tokens")?,
-            cache_read: parse_u64_text(&cr, "net_cache_read_tokens")?,
-            cache_write_5m: 0,
-            cache_write_1h: 0,
+        Ok(BigTokenCounts {
+            input: parse_big_text(&i, "net_input_tokens")?,
+            output: parse_big_text(&o, "net_output_tokens")?,
+            cache_write: parse_big_text(&cw, "net_cache_write_tokens")?,
+            cache_read: parse_big_text(&cr, "net_cache_read_tokens")?,
+            cache_write_5m: BigUint::ZERO,
+            cache_write_1h: BigUint::ZERO,
             cache_write_split_known: false,
         })
     }
@@ -2114,10 +2113,15 @@ impl HistoryDb {
         let (rollup_summary, rollups_changed) = write_rollups_in_tx(&tx, rollups, policy, run_id)?;
         let changed = events_changed || rollups_changed;
         // 净新增 = **本批插入**事件的四桶之和（只补来源证据的记录不计）。
-        let net_new = write_summary.inserted_tokens;
         // 完全相同的重复导入：不新增用量、不重复来源、不递增 generation，
         // 但审计批次照常登记（计划 §3：可以记录审计结果）。
-        finish_import_run(&tx, run_id, net_new, &write_summary, &rollup_summary)?;
+        finish_import_run(
+            &tx,
+            run_id,
+            &write_summary.inserted_tokens,
+            &write_summary,
+            &rollup_summary,
+        )?;
         if changed {
             bump_generation(&tx)?;
         }
@@ -2242,14 +2246,14 @@ impl HistoryDb {
         Ok(n as u64)
     }
 
-    /// 四桶合计：**流式读取 + Rust 受检累加**（不把全表拉进内存，也不让
-    /// SQLite 隐式转 REAL）；溢出明确报错，不回绕、不饱和。
-    pub fn totals(&self) -> Result<TokenCounts> {
+    /// 四桶合计：**流式读取 + Rust 任意精度累加**（不把全表拉进内存，也不让
+    /// SQLite 隐式转 REAL）；单条事件受 `u64` 约束，聚合累计永不溢出。
+    pub fn totals(&self) -> Result<BigTokenCounts> {
         self.totals_filtered(None)
     }
 
     /// 按应用过滤的四桶合计（`None` = 全部应用）。
-    pub fn totals_filtered(&self, app: Option<AgentKind>) -> Result<TokenCounts> {
+    pub fn totals_filtered(&self, app: Option<AgentKind>) -> Result<BigTokenCounts> {
         let sql = "SELECT input_tokens, output_tokens, cache_write_tokens, cache_read_tokens
                    FROM usage_events WHERE (?1 IS NULL OR app = ?1)";
         let mut stmt = self.conn.prepare(sql)?;
@@ -2261,7 +2265,7 @@ impl HistoryDb {
                 r.get::<_, String>(3)?,
             ))
         })?;
-        let mut acc = TokenCounts::default();
+        let mut acc = BigTokenCounts::default();
         for row in rows {
             let (i, o, cw, cr) = row?;
             let counts = TokenCounts {
@@ -2273,9 +2277,7 @@ impl HistoryDb {
                 cache_write_1h: 0,
                 cache_write_split_known: false,
             };
-            acc = acc
-                .checked_add(&counts)
-                .ok_or_else(|| anyhow!("历史库 token 合计溢出可表示范围"))?;
+            acc.add_counts(&counts);
         }
         Ok(acc)
     }
@@ -2637,10 +2639,7 @@ fn write_events_in_tx(
             }
             let id = insert_event(tx, write)?;
             summary.inserted += 1;
-            summary.inserted_tokens = summary
-                .inserted_tokens
-                .checked_add(&write.tokens)
-                .ok_or_else(|| anyhow!("本批新增用量累计溢出可表示范围"))?;
+            summary.inserted_tokens.add_counts(&write.tokens);
             changed = true;
             id
         } else if hits.ids.len() == 1 {
@@ -2670,10 +2669,7 @@ fn write_events_in_tx(
                 }
                 let event_id = insert_event(tx, write)?;
                 summary.inserted += 1;
-                summary.inserted_tokens = summary
-                    .inserted_tokens
-                    .checked_add(&write.tokens)
-                    .ok_or_else(|| anyhow!("本批新增用量累计溢出可表示范围"))?;
+                summary.inserted_tokens.add_counts(&write.tokens);
                 changed = true;
                 let mirror =
                     codex_mirror_origin(write).ok_or_else(|| anyhow!("升级映射缺少镜像来源键"))?;
@@ -2719,10 +2715,7 @@ fn write_events_in_tx(
                 // 命中全是异响应行：本响应在此前从未入账，插入新事实。
                 let id = insert_event(tx, write)?;
                 summary.inserted += 1;
-                summary.inserted_tokens = summary
-                    .inserted_tokens
-                    .checked_add(&write.tokens)
-                    .ok_or_else(|| anyhow!("本批新增用量累计溢出可表示范围"))?;
+                summary.inserted_tokens.add_counts(&write.tokens);
                 changed = true;
                 id
             } else {
@@ -3074,7 +3067,7 @@ fn codex_mirror_origin(w: &EventWrite) -> Option<&EventOrigin> {
 /// 重新观察，挑战者胜出（键相同则行为恒定，幂等）；键不同取键更大者
 ///（键是来源记录的稳定身份，比较结果与到达顺序无关）。
 fn same_instant_challenger_wins(existing: &StoredEvent, w: &EventWrite) -> bool {
-    let (w_total, e_total) = (w.tokens.total(), existing.tokens.total());
+    let (w_total, e_total) = (w.tokens.total_u128(), existing.tokens.total_u128());
     if w_total != e_total {
         return w_total > e_total;
     }
@@ -3112,7 +3105,7 @@ fn write_rollups_in_tx(
     let mut summary = RollupSummary::default();
     let mut changed = false;
     for r in rollups {
-        if r.request_count == 0 && r.tokens.total() == 0 {
+        if r.request_count == 0 && r.tokens.is_zero() {
             // 空快照没有统计意义，不写入（避免用 0 覆盖已有历史）。
             continue;
         }
@@ -3262,7 +3255,7 @@ fn insert_import_run(tx: &Transaction<'_>, run: &ImportRunRecord) -> Result<i64>
 fn finish_import_run(
     tx: &Transaction<'_>,
     run_id: i64,
-    net_new: TokenCounts,
+    net_new: &BigTokenCounts,
     write_summary: &WriteSummary,
     rollup_summary: &RollupSummary,
 ) -> Result<()> {
@@ -4117,6 +4110,16 @@ fn parse_u64_text(raw: &str, what: &str) -> Result<u64> {
         .map_err(|e| anyhow!("{what} 非法（{raw:?}: {e}）"))
 }
 
+fn parse_big_text(raw: &str, what: &str) -> Result<BigUint> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.starts_with('-') || trimmed.starts_with('+') {
+        bail!("{what} 非法（期望十进制无符号整数，得到 {raw:?}）");
+    }
+    trimmed
+        .parse::<BigUint>()
+        .map_err(|e| anyhow!("{what} 非法（{raw:?}: {e}）"))
+}
+
 fn parse_agent(raw: &str) -> Result<AgentKind> {
     AgentKind::parse(raw).map_err(|e| anyhow!("{e}"))
 }
@@ -4157,7 +4160,7 @@ fn keeper_order(a: &StoredEvent, b: &StoredEvent) -> std::cmp::Ordering {
     b.precedence
         .cmp(&a.precedence)
         .then_with(|| b.ts.cmp(&a.ts))
-        .then_with(|| b.tokens.total().cmp(&a.tokens.total()))
+        .then_with(|| b.tokens.total_u128().cmp(&a.tokens.total_u128()))
         .then_with(|| session_sort_key(a).cmp(&session_sort_key(b)))
         .then_with(|| a.event_key.cmp(&b.event_key))
         .then_with(|| a.id.cmp(&b.id))

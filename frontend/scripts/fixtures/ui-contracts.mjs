@@ -258,10 +258,13 @@ function eventRow(i, opts = {}) {
   const ts = `2026-10-0${(i % 7) + 1} 1${i % 10}:0${i % 6}:00`;
   const model = opts.model ?? "claude-sonnet-4-5-20250929";
   const project = opts.project ?? "/home/dev/projects/tokenscope";
+  const recordId = opts.record_id ?? `rid-${i}`;
+  const rowId = opts.row_id ?? `event:${i + 1}`;
   return {
     ts,
-    record_id: `rid-${i}`,
-    cursor: `${ts.replace(" ", "T")}.000Z|rid-${i}`,
+    record_id: recordId,
+    cursor: `${ts.replace(" ", "T")}.000Z|${recordId}`,
+    row_id: rowId,
     agent: opts.agent ?? "claude-code",
     model,
     session_id: `sess-${i}`,
@@ -311,13 +314,16 @@ function rollupRow(day, opts = {}) {
     cache_write_split_estimated: false,
     cache_price_zero_estimated: opts.cache_price_zero_estimated ?? false,
   };
+  const modelKey = opts.model ?? "claudeopus47";
+  const agent = opts.agent ?? "claude-code";
   return {
     ts: day,
     // 日汇总没有请求 ID/会话/项目（后端一律空串），不补造。
     record_id: "",
-    cursor: `rollup|${opts.model ?? "claudeopus47"}|${day}`,
-    agent: "claude-code",
-    model: opts.model ?? "claudeopus47",
+    cursor: `rollup|${modelKey}|${day}`,
+    row_id: opts.row_id ?? `rollup:${JSON.stringify([day, modelKey, meta.source_tz, agent])}`,
+    agent,
+    model: modelKey,
     session_id: "",
     project: "",
     input: opts.input ?? 0,
@@ -1300,6 +1306,35 @@ function createSessionTable(cfg) {
         r.rollup ? args.project === UNKNOWN_PROJECT : r.project === args.project,
       );
     if (args?.day) scoped = scoped.filter((r) => r.ts.startsWith(args.day));
+    // 按真实后端 PageCursor v2 格式为本次会话签发游标：每次刷新新建 query_id 时
+    // 游标都会随 qid 变化，仅用于会话内分页；跨刷新稳定性由独立的 row_id 承载。
+    const mfp = JSON.stringify([s.by, s.tz, s.range ?? null]);
+    const dfp = JSON.stringify([model ?? null, args?.project ?? null, args?.day ?? null]);
+    let rollupIndex = 0;
+    const scopedWithCursor = scoped.map((r, i) => {
+      const sessionCursor = r.rollup
+        ? JSON.stringify({
+            v: 2,
+            qid: id,
+            mfp,
+            dfp,
+            ts: r.ts,
+            rid: "",
+            seq: 0,
+            kind: "rollup",
+            ridx: rollupIndex++,
+          })
+        : JSON.stringify({
+            v: 2,
+            qid: id,
+            mfp,
+            dfp,
+            ts: `${r.ts.replace(" ", "T")}.000Z`,
+            rid: r.record_id ?? "",
+            seq: i,
+          });
+      return { ...r, cursor: sessionCursor };
+    });
     // 翻页偏移在**当前筛选后的行序**内定位（与后端游标按筛选指纹定位一致）；
     // 用全量行序的下标切筛选后的列表会漏掉跨页的日汇总行。
     let offset = 0;
@@ -1308,7 +1343,7 @@ function createSessionTable(cfg) {
         // 游标必须属于当前会话（外会话/旧磁盘视图的游标 → 结构化拒绝）。
         return reject("query_expired: 游标不属于当前查询会话，请刷新重试");
       }
-      const idx = scoped.findIndex((r) => r.cursor === before);
+      const idx = scopedWithCursor.findIndex((r) => r.cursor === before);
       offset = idx + 1;
     }
     s.pagesServed += 1;
@@ -1316,13 +1351,13 @@ function createSessionTable(cfg) {
       sessions.delete(id);
       return reject("query_expired: 查询会话已过期，请刷新重试");
     }
-    const page = scoped.slice(offset, offset + pageSize);
+    const page = scopedWithCursor.slice(offset, offset + pageSize);
     for (const r of page) s.cursors.add(r.cursor);
     return {
       query_id: id,
       pricing_revision: PRICING_REVISION,
       rows: page,
-      total: scoped.length,
+      total: scopedWithCursor.length,
       warnings: [],
       ...(migrate ? { model_filter_migration: { from: args.model, to: model } } : {}),
     };
@@ -1354,20 +1389,117 @@ function createSessionTable(cfg) {
  */
 export function buildFixture(name) {
   const cfg = SCENARIOS[name] ?? SCENARIOS.normal;
-  // 模型行高契约：展示名与身份键故意不同，数量只来自合成 fixture。
-  const modelGroups = cfg.modelCount
-    ? Array.from({ length: cfg.modelCount }, (_, i) => ({
-        ...group(`readable-model-${i}`, (cfg.modelCount - i) * 1000),
-        label: `Model ${String(i).padStart(2, "0")} / a-very-long-friendly-model-name-for-truncation`,
-      }))
+  // 非时间维度行高契约：模型 / 项目 / 应用统一用合成数据覆盖 5/20/40 行，
+  // 四桶互斥堆叠均有非零值；展示名与身份键故意不同（项目含长路径以验证轴上省略与悬浮全名）。
+  const rowCount = cfg.modelCount;
+  const stackedTokens = (input) => ({
+    output: Math.round(input * 0.5),
+    cache_write: Math.round(input * 0.25),
+    cache_read: Math.round(input * 0.25),
+  });
+  const modelGroups = rowCount
+    ? Array.from({ length: rowCount }, (_, i) => {
+        const input = (rowCount - i) * 1000;
+        return {
+          ...group(`readable-model-${i}`, input, stackedTokens(input)),
+          label: `Model ${String(i).padStart(2, "0")} / a-very-long-friendly-model-name-for-truncation`,
+        };
+      })
     : null;
-  const rows = modelGroups
-    ? modelGroups.map((g, i) => eventRow(i + 1, { model: g.key }))
+  const projectGroups = rowCount
+    ? Array.from({ length: rowCount }, (_, i) => {
+        const input = (rowCount - i) * 1000;
+        return {
+          ...group(
+            `/workspace/org/team/repo-group/Project ${String(i).padStart(2, "0")} / a-very-long-project-directory-name-for-truncation`,
+            input,
+            stackedTokens(input),
+          ),
+          label: `Project ${String(i).padStart(2, "0")} / a-very-long-project-directory-name-for-truncation`,
+        };
+      })
+    : null;
+  const agentGroups = rowCount
+    ? Array.from({ length: rowCount }, (_, i) => {
+        const input = (rowCount - i) * 1000;
+        return {
+          ...group(`readable-agent-${i}`, input, stackedTokens(input)),
+          label: `Agent ${String(i).padStart(2, "0")} / synthetic-coding-assistant`,
+        };
+      })
+    : null;
+  const mixedCount = cfg.mixedRowCount;
+  const mixedModelGroups = mixedCount
+    ? Array.from({ length: mixedCount }, (_, i) => {
+        const input = (mixedCount - i) * 1000;
+        const label =
+          i === 1
+            ? "DeepSeek V4.1 Flash 1017"
+            : i === 19
+              ? "DeepSeek V4 Flash 0731"
+              : i === 39
+                ? "Model 39 / an-extra-long-friendly-model-name-that-must-truncate-at-end-never-left"
+                : i === 41
+                  ? "Nemotron 3 Ultra 550B A55B"
+                  : `m${String(i).padStart(2, "0")}`;
+        return {
+          ...group(`mixed-model-${i}`, input, stackedTokens(input)),
+          label,
+        };
+      })
+    : null;
+  const mixedProjectGroups = mixedCount
+    ? Array.from({ length: mixedCount }, (_, i) => {
+        const input = (mixedCount - i) * 1000;
+        const label =
+          i === 1
+            ? "DeepSeek-Workspace-1017"
+            : i === 19
+              ? "DeepSeek-Workspace-0731"
+              : i === 39
+                ? "Project 39 / an-extra-long-project-directory-name-that-must-truncate-at-end-never-left"
+                : i === 41
+                  ? "Nemotron 3 Ultra 550B Repo"
+                  : `p${String(i).padStart(2, "0")}`;
+        return {
+          ...group(`/workspace/org/team/repo-group/${label}`, input, stackedTokens(input)),
+          label,
+        };
+      })
+    : null;
+  const mixedAgentGroups = mixedCount
+    ? Array.from({ length: mixedCount }, (_, i) => {
+        const input = (mixedCount - i) * 1000;
+        const label =
+          i === 1
+            ? "DeepSeek Agent 1017"
+            : i === 19
+              ? "DeepSeek Agent 0731"
+              : i === 39
+                ? "Agent 39 / an-extra-long-coding-assistant-display-name-for-end-ellipsis-check"
+                : i === 41
+                  ? "Nemotron 3 Ultra 550B Agent"
+                  : `a${String(i).padStart(2, "0")}`;
+        return {
+          ...group(`mixed-agent-${i}`, input, stackedTokens(input)),
+          label,
+        };
+      })
+    : null;
+  const activeModelGroups = mixedModelGroups ?? modelGroups;
+  const activeProjectGroups = mixedProjectGroups ?? projectGroups;
+  const activeAgentGroups = mixedAgentGroups ?? agentGroups;
+  const rows = activeModelGroups
+    ? activeModelGroups.map((g, i) => eventRow(i + 1, { model: g.key }))
     : rowsFor(cfg.kind);
   const table = createSessionTable({
     rows,
-    groupsOf: (by, session) =>
-      by === "model" && modelGroups ? modelGroups : dimGroups(cfg.kind, by, session),
+    groupsOf: (by, session) => {
+      if (by === "model" && activeModelGroups) return activeModelGroups;
+      if (by === "project" && activeProjectGroups) return activeProjectGroups;
+      if (by === "agent" && activeAgentGroups) return activeAgentGroups;
+      return dimGroups(cfg.kind, by, session);
+    },
     pageSize: cfg.pageSize ?? 2,
     expireAfterPages: cfg.expireAfterPages ?? Infinity,
     legacyModelTargets: cfg.legacyModelTargets,
@@ -1768,6 +1900,9 @@ const SCENARIOS = {
   "model-rows-5": { kind: "normal", modelCount: 5 },
   "model-rows-20": { kind: "normal", modelCount: 20 },
   "model-rows-40": { kind: "normal", modelCount: 40 },
+  "model-rows-mixed-40": { kind: "normal", mixedRowCount: 40 },
+  "model-rows-mixed-41": { kind: "normal", mixedRowCount: 41 },
+  "model-rows-mixed-43": { kind: "normal", mixedRowCount: 43 },
   // RC09：设置首载失败 → 重试恢复全部依赖控件
   "settings-read-failure": { kind: "normal", settings: "fail-then-ok" },
   // RC09：真实浏览器重演"读取挂起 → 编辑 → 保存成功 → 释放旧读取"

@@ -755,13 +755,33 @@ v7 后新格式以强身份天然去重；弱记录（旧格式）沿用保守�
     仍按现行规则处理。真实目标冲突仍保持歧义。
     同步时无 `cost` 的条目写入快照的 `names` 段（模型级 name + canonical 关系），
     **绝不进入报价候选**；旧快照无该字段时按空处理，计价索引版本不变。
+    **双源展示名补充（models.dev + OpenRouter）**：运行时同时读取现有 `pricing-openrouter.json`
+    快照中的 `entries` 与 `names` 段的 `id`/`name`（含无报价条目，以及同步时因负价、非法
+    override 或 pricing 结构异常而被拒绝计价但名称有效的条目；后者仅写入 `names` 段、
+    **绝不进入报价候选**），仍与报价索引解耦，覆盖冷加载、已有 `PricingIndex` 恢复与
+    同步后刷新。models.dev 已确认的规范名（随包目录及快照正式名）保持最高优先；models.dev
+    无可用名称或仅有价格但缺可信名称时，继续尝试 OpenRouter 补名（仅允许完整 ID 等价、
+    `openrouter/<作者>/<模型>` 显式渠道前缀、models.dev 显式确认的别名映射，或裸 ID 在双源下
+    唯一确认身份；若 OpenRouter 精确条目无可用名称或仅为 ID 抄写，则继续查已确认指向同一目标的
+    别名；OpenRouter 的 `~` 动态路由指针仅允许完整 ID 命中，不干扰裸 ID）。严格保留渠道、
+    日期、Preview、`:free` 等语义边界；若 models.dev 与 OpenRouter 对同一裸 ID 指向不同型号且
+    无显式别名确认，则保留原始 ID 并记 `conflicting_sources`。**弱证据例外**：OpenRouter 侧仅有
+    同末段隐式自 ID（无显式 canonical 映射）时，该命中只是「存在一个同末段渠道」，不构成身份
+    证据；随包公开目录已确认发布方身份时按该身份取名，不判跨源冲突、也不让渠道名盖掉发布方
+    规范名（原生 `ui-identity` 的 `model_variants_merge_with_friendly_name`）。若 models.dev 侧
+    也只有快照自 ID，两侧同为弱证据且指向不同目标，仍记 `conflicting_sources`；OpenRouter 有
+    显式 canonical 指向不同目标同样是真实冲突。解析结果同时记录两路各自状态（`matched` / `checked_no_match` /
+    `ambiguous_or_conflict` / `unavailable_not_synced` / `unavailable_load_failed`）：
+    只有两路均已加载并检查且无可信名称时才记 `no_identity_evidence` / `no_trusted_name`；
+    任一路未同步、离线或加载失败而未命中时记 `source_unavailable`，不把不可用写成双源确认无名。
     名称冲突、无规范身份或无公开名称时返回缺失并给出结构化原因
-    （`ambiguous_identity` / `conflicting_names` / `no_identity_evidence` /
-    `no_trusted_name`），聚合保留原始 ID。日期变体、Codex Spark / Flash / Pro 等
-    各有独立规范条目时各用自己的名字，不带后缀的型号不借日期版本名。
-  - **升级零迁移**：`SNAPSHOT_VERSION` 22 → 23 → 24 → **25**（v0.9.9 展示名改为
-    独立目录查询，v24 快照里的模型标签不再可信），旧界面快照忽略并由首次成功
-    查询重建，筛选偏好与时区照常保留。历史库（含 `model_identity` /
+    （`ambiguous_identity` / `conflicting_sources` / `conflicting_names` /
+    `no_identity_evidence` / `no_trusted_name` / `source_unavailable`），聚合保留原始 ID。
+    日期变体、Codex Spark / Flash / Pro 等各有独立规范条目时各用自己的名字，不带后缀的型号不借日期版本名。
+  - **升级零迁移**：`SNAPSHOT_VERSION` 22 → 23 → 24 → 25 → **26**（v0.9.9 展示名改为
+    独立目录查询且请求明细行新增跨刷新稳定的 `row_id`，v25 及更早快照缺少 `row_id`
+    会在冷启首刷时触发滚动锚点失配），旧界面快照忽略并由首次成功查询重建，筛选偏好与
+    时区照常保留。历史库（含 `model_identity` /
     `identity_revision`）、已导入 CCS、费率快照与既有价格索引不因升级重写，
     无须重新导入。目录元数据在正常同步时作为可选展示字段保留，不影响计价输入
     与价格索引版本。

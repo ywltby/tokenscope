@@ -12,7 +12,11 @@ import { useT } from "../lib/i18n";
 
 const t = useT();
 
-const props = defineProps<{ report: SummaryReport }>();
+const props = defineProps<{
+  report: SummaryReport;
+  /** 筛选重置身份：维度/来源/时间/日粒度/时区变化时才回顶部，同筛选刷新保持滚动与行锚点。 */
+  resetKey?: string | null;
+}>();
 /// U04：合计行不是维度值——用**独立事件**通知父级，父级不再靠字面量「合计」
 /// 判断（真实维度行走 `row-click`，合计行走 `total-row`）。
 const emit = defineEmits<{ (e: "row-click", key: string): void; (e: "total-row"): void }>();
@@ -163,7 +167,12 @@ const selectionNotes = computed<string[]>(() => {
         t("dashboard.aggregateTitle")
       }}</AggregateInfoTooltip>
     </div>
-    <ScrollList :rows="rows" :label="t('dashboard.aggregateListAria')">
+    <ScrollList
+      :rows="rows"
+      :reset-key="props.resetKey ?? props.report.by"
+      :row-key="rowKey"
+      :label="t('dashboard.aggregateListAria')"
+    >
       <template #default="{ rows: visibleRows }">
         <NDataTable
           :columns="columns"

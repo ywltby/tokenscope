@@ -164,26 +164,48 @@ fn model_identity_groups_aliases_across_agents() {
 #[test]
 fn model_display_name_requires_trusted_source() {
     let dir = tmp("trusted-source");
-    // models.dev 提供可信模型名；OpenRouter 的同等价 ID 只有渠道别名。
+    // 两源指向同一模型（同完整 ID）：models.dev 规范名优先于 OpenRouter。
     let md = sync_to(
         &dir,
         "pricing-modelsdev.json",
         r#"{"acme": {"models": {"opus-5.5": {"name": "Trusted Model Name", "cost": {"input": 3, "output": 15}}}}}"#,
     );
-    let orp = dir.join("openrouter.json");
+    let orp_same = dir.join("openrouter-same.json");
     std::fs::write(
-        &orp,
-        r#"{"v":2,"synced_at":"t","entries":[{"id":"alias/opus5.5","name":"Channel Alias","prompt":0.000004,"completion":0.00002}]}"#,
+        &orp_same,
+        r#"{"v":2,"synced_at":"t","entries":[{"id":"acme/opus5.5","name":"Acme: Opus 5.5 OR","prompt":0.000004,"completion":0.00002}]}"#,
     )
     .unwrap();
-    let (p, _w) = Pricing::load(None, Some(&md), Some(&orp));
+    let (p, _w) = Pricing::load(None, Some(&md), Some(&orp_same));
     assert_eq!(
         p.display_name_for("opus55").as_deref(),
         Some("Trusted Model Name"),
-        "展示名只认可信来源（models.dev）的模型级 name"
+        "两源一致时 models.dev 规范名优先"
     );
 
-    // 只有 OpenRouter 时没有可信名 → None（聚合退回原始代表写法）。
+    // 两源指向不同发布方且无显式别名：裸 ID 视为真实冲突，保留原始 ID；完整 ID 各用各名。
+    let orp_conflict = dir.join("openrouter-conflict.json");
+    std::fs::write(
+        &orp_conflict,
+        r#"{"v":2,"synced_at":"t","entries":[{"id":"alias/opus5.5","name":"Channel Alias","prompt":0.000004,"completion":0.00002}]}"#,
+    )
+    .unwrap();
+    let (p_conflict, _w_conflict) = Pricing::load(None, Some(&md), Some(&orp_conflict));
+    assert_eq!(
+        p_conflict.display_name_for("opus55"),
+        None,
+        "双源指向不同发布方的裸 ID 冲突时必须保留原始 ID"
+    );
+    assert_eq!(
+        p_conflict.display_name_for("acme/opus-5.5").as_deref(),
+        Some("Trusted Model Name")
+    );
+    assert_eq!(
+        p_conflict.display_name_for("alias/opus5.5").as_deref(),
+        Some("Channel Alias")
+    );
+
+    // 仅 OpenRouter 有唯一匹配时，由 OpenRouter 补充展示名。
     let dir2 = tmp("trusted-source-or-only");
     let orp2 = dir2.join("openrouter.json");
     std::fs::write(
@@ -193,9 +215,9 @@ fn model_display_name_requires_trusted_source() {
     .unwrap();
     let (p2, _w2) = Pricing::load(None, None, Some(&orp2));
     assert_eq!(
-        p2.display_name_for("opus55"),
-        None,
-        "渠道别名不得成为模型展示名"
+        p2.display_name_for("opus55").as_deref(),
+        Some("Channel Alias"),
+        "models.dev 无名时 OpenRouter 唯一匹配可补名"
     );
 }
 

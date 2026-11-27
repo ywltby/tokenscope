@@ -1,11 +1,26 @@
 /// 与 Rust 侧 SummaryReport / Group / CollectStats 逐字段对应的类型。
 /// 注意：Codex 专属计数器为 0 时 Rust 端会省略字段，读取用 `?? 0`。
 
+/**
+ * 单个 token 桶的 IPC 值：
+ * - `<= 2^53 - 1` 时为精确 JSON number；
+ * - 聚合累计超出 JS `Number.MAX_SAFE_INTEGER` 后由后端序列化为十进制字符串，
+ *   避免 `JSON.parse()` 丢尾数，前端统一经 `toTokenBigInt` 以原生 `BigInt` 运算。
+ */
+export type TokenCountValue = number | string;
+
 export interface TokenCounts {
-  input: number;
-  output: number;
-  cache_write: number;
-  cache_read: number;
+  input: TokenCountValue;
+  output: TokenCountValue;
+  cache_write: TokenCountValue;
+  cache_read: TokenCountValue;
+}
+
+export interface BigTokenCounts {
+  input: bigint;
+  output: bigint;
+  cache_write: bigint;
+  cache_read: bigint;
 }
 
 export interface Group {
@@ -347,7 +362,7 @@ export type RateKind = "fixed" | "same_as_input" | "assumed_zero" | "unknown";
 
 export interface CostLine {
   kind: CostLineKind;
-  tokens: number;
+  tokens: TokenCountValue;
   /** USD / 百万 token；null = 该分项缺价（未计价，≠ 0） */
   unit_price: number | null;
   subtotal: number;
@@ -388,17 +403,12 @@ export interface EventCostBreakdown {
   matched: MatchedCandidate;
   /** "prompt_tokens" 等 */
   basis: string | null;
-  basis_value: number;
+  basis_value: TokenCountValue;
   /** 命中分段标签；null = 基础价档 */
   segment_label: string | null;
   lines: CostLine[];
   cost_usd: number;
-  unknown: {
-    input: number;
-    output: number;
-    cache_write: number;
-    cache_read: number;
-  };
+  unknown: TokenCounts;
   complete: boolean;
   /** 有不完整候选被排除时的提示（非本公式 unknown） */
   excluded_candidate_warning?: string | null;
@@ -412,8 +422,13 @@ export interface EventRow {
   ts: string;
   /** D1 游标第二分量（Claude = message.id；Codex 为空） */
   record_id: string;
-  /** Task 2：不透明游标（完整精度 UTC 时间戳 + record_id），翻页原样回传 */
+  /** Task 2：会话内不透明分页游标（绑定 query_id），仅用于翻页原样回传 */
   cursor: string;
+  /**
+   * 跨查询刷新稳定的行身份标识（原生请求 = `event:<id>`，CCS 日汇总 =
+   * `rollup:[day,model_key,source_tz,app]`），与会话分页游标解耦，供滚动锚点与浮层状态复用。
+   */
+  row_id?: string;
   agent: string;
   model: string;
   session_id: string;
@@ -422,13 +437,13 @@ export interface EventRow {
   session_initial_cwd?: string | null;
   /** B02：该请求作用域内最近观察到的结构化工作目录（保留子目录细节） */
   event_cwd?: string | null;
-  input: number;
-  output: number;
-  cache_write: number;
-  cache_read: number;
+  input: TokenCountValue;
+  output: TokenCountValue;
+  cache_write: TokenCountValue;
+  cache_read: TokenCountValue;
   /** N18：5m/1h 缓存写分项（分项未知时缺省/null，不得当 0） */
-  cache_write_5m?: number | null;
-  cache_write_1h?: number | null;
+  cache_write_5m?: TokenCountValue | null;
+  cache_write_1h?: TokenCountValue | null;
   cost_usd?: number | null;
   /** Task 6：请求级费用计算明细；null/缺省 = 未收录模型或旧后端 */
   cost_breakdown?: EventCostBreakdown | null;
@@ -542,7 +557,22 @@ export const STAT_KEYS: { key: string; label: string }[] = [
   { key: "io_errors", label: "读取失败" },
 ];
 
-export function fmtNum(n: number): string {
+export function fmtNum(n: number | bigint | string): string {
+  if (typeof n === "bigint") {
+    const sign = n < 0n ? "-" : "";
+    const digits = (n < 0n ? -n : n).toString();
+    return sign + digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+  if (typeof n === "string") {
+    const trimmed = n.trim();
+    if (/^-?\d+$/.test(trimmed)) {
+      const sign = trimmed.startsWith("-") ? "-" : "";
+      const digits = sign ? trimmed.slice(1) : trimmed;
+      return sign + digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    }
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed.toLocaleString("en-US") : trimmed;
+  }
   return n.toLocaleString("en-US");
 }
 

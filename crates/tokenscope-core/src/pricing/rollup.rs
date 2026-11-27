@@ -255,7 +255,7 @@ impl Pricing {
         if zero_estimated {
             est.cache_price_zero_estimated = true;
         }
-        est.complete = est.unknown.total() == 0
+        est.complete = est.unknown.is_zero()
             && !est.cache_price_zero_estimated
             && !est.cache_write_split_estimated;
         let complete_count = complete_entry.iter().filter(|&&c| c).count();

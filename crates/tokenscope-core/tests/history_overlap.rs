@@ -644,15 +644,10 @@ fn codex_compaction_ccs_union_is_independent_of_import_order() {
         let combined = summary(&options).unwrap();
         assert_eq!(combined.totals.requests, 1);
         let tokens = &combined.totals.tokens;
-        assert_eq!(
-            (
-                tokens.input,
-                tokens.output,
-                tokens.cache_write,
-                tokens.cache_read
-            ),
-            (11705, 491, 3000, 12000)
-        );
+        assert_eq!(tokens.input, 11705);
+        assert_eq!(tokens.output, 491);
+        assert_eq!(tokens.cache_write, 3000);
+        assert_eq!(tokens.cache_read, 12000);
         let parsed = CodexSource::new(&root).collect().unwrap();
         assert_eq!(parsed.events.len(), 1, "两种顺序都必须具有原生压缩证据");
         let history = HistoryDb::open(&dir.join("data/history.db")).unwrap();
@@ -664,7 +659,7 @@ fn codex_compaction_ccs_union_is_independent_of_import_order() {
                 .len(),
             1
         );
-        results.push((combined.totals.requests, *tokens));
+        results.push((combined.totals.requests, tokens.clone()));
         drop(history);
         for id in [&first.query_id, &combined.query_id] {
             tokenscope::query::backdate_query_for_tests(id, tokenscope::query::QUERY_IDLE_TTL);

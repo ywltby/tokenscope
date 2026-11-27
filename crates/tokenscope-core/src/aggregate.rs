@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
-use crate::model::{AgentKind, TokenCounts, UNKNOWN_PROJECT, UsageEvent};
+use crate::model::{AgentKind, BigTokenCounts, TokenCounts, UNKNOWN_PROJECT, UsageEvent};
 use crate::pricing::Pricing;
 
 /// MP04：聚合中间态——分组累计 + 该组原始模型名的稳定代表写法。
@@ -104,7 +104,7 @@ pub struct Group {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub requests: u64,
-    pub tokens: TokenCounts,
+    pub tokens: BigTokenCounts,
     pub cost_usd: f64,
     pub unknown_pricing: bool,
     /// N18：本组含「事件缺写入分档、按合并价估算」的请求——独立于
@@ -115,7 +115,7 @@ pub struct Group {
     /// 金额已按 0 计入、没有未计价 token，但不是完整官方价格（独立披露）。
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub cache_price_zero_estimated: bool,
-    pub unknown_tokens: TokenCounts,
+    pub unknown_tokens: BigTokenCounts,
     /// H06：本组未知费用的**原因**（如 `rollup_only` = 该组含只有日粒度的历史，
     /// 不能按当前档位/峰谷重估）。缺价（模型未收录）时为 None，两者的处置同为
     /// "计入未知 token"，但原因不同，界面必须区分。
@@ -220,7 +220,7 @@ pub struct RollupCoverage {
     /// 上述被汇总替代的明细 token（已计入统计的是汇总值；这些只是明细侧的
     /// 观察量，用于向用户解释"明细看到了多少、为什么总量更大"）。
     #[serde(default)]
-    pub covered_detail_tokens: TokenCounts,
+    pub covered_detail_tokens: BigTokenCounts,
     /// C 类：请求数与四桶方向**交叉**，既不能用明细逐项覆盖汇总、也不能用
     /// 汇总吸收明细的桶数。这些桶按请求明细统计、汇总不叠加，不做逐字段取
     /// 最大或捏造差额；诊断走本结构的独立字段，不进入 `SummaryReport.warnings`
@@ -228,7 +228,7 @@ pub struct RollupCoverage {
     pub unresolved_buckets: u64,
     /// 上述交叉冲突桶中汇总侧的四桶合计（仅作对账规模，不表示"丢失了这么多
     /// token"——两侧不是可以相加的同量数据）。
-    pub unresolved_covered_tokens: TokenCounts,
+    pub unresolved_covered_tokens: BigTokenCounts,
     /// A 类：快照范围内明细逐项覆盖汇总（含完全相等），已按请求明细统计、
     /// 汇总不叠加的桶数。这是**统计来源选择**，不声称两侧请求集合已被证明
     /// 完全相同；正常路径不产生告警，依据由界面放在可展开的统计说明里。
@@ -508,21 +508,34 @@ fn push_event_into(
             acc.representative = Some(e.model.to_string());
         }
         let g = &mut acc.group;
-        // 临时值上全部成功才提交（requests/tokens/unknown/cost）。
+        // 先完成所有可能失败的检查（请求数受检累加、费用有限性），全部通过后再统一提交；
+        // token 聚合累计采用任意精度 BigTokenCounts，永不溢出。
         let new_requests = g
             .requests
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("分组 {} 的请求数累计超出可表示范围", key_err))?;
         let event_tokens = e.tokens;
-        let mut new_tokens = g.tokens;
-        let mut new_unknown = g.unknown_tokens;
-        new_tokens = new_tokens
-            .checked_add(&event_tokens)
-            .ok_or_else(|| anyhow::anyhow!("分组 {} 的 token 累计超出可表示范围", key_err))?;
         let mut new_cost = g.cost_usd;
         // 确定性计价只算一次（百万事件聚合下两次调用是纯浪费）；estimate
         // 不产生失败路径，求值先后不影响"临时值全部成功才提交"的纪律。
         let estimate = pricing.estimate(e.model, &event_tokens, e.ts);
+        let unknown_delta = match &estimate {
+            Some(est) => {
+                new_cost += est.cost;
+                if !new_cost.is_finite() {
+                    anyhow::bail!("分组 {} 的费用累计出现非有限值", key_err);
+                }
+                // B3：部分计价（分项缺价格）不按 0——未知分项的 token 单列，
+                // † 标记语义即"费用仅含已计价部分"。
+                if !est.complete {
+                    Some(est.unknown)
+                } else {
+                    None
+                }
+            }
+            None => Some(event_tokens),
+        };
+        // 全部成功 → 提交（agents 追加不涉算术，随后执行）。
         // v0.9.2（第四轮复核）：只有**实际用量获得覆盖**才算费用依据；
         // 找到候选但全部实际 token 都缺价 → 仍是完全未定价。零元费率覆盖
         // 实际用量 → 金额 0 但有依据。
@@ -532,30 +545,11 @@ fn push_event_into(
         {
             acc.has_estimated_cost = true;
         }
-        match &estimate {
-            Some(est) => {
-                new_cost += est.cost;
-                if !new_cost.is_finite() {
-                    anyhow::bail!("分组 {} 的费用累计出现非有限值", key_err);
-                }
-                // B3：部分计价（分项缺价格）不按 0——未知分项的 token 单列，
-                // † 标记语义即"费用仅含已计价部分"。
-                if !est.complete {
-                    new_unknown = new_unknown.checked_add(&est.unknown).ok_or_else(|| {
-                        anyhow::anyhow!("分组 {} 的未知 token 累计超出可表示范围", key_err)
-                    })?;
-                }
-            }
-            None => {
-                new_unknown = new_unknown.checked_add(&event_tokens).ok_or_else(|| {
-                    anyhow::anyhow!("分组 {} 的未知 token 累计超出可表示范围", key_err)
-                })?;
-            }
-        }
-        // 全部成功 → 提交（agents 追加不涉算术，随后执行）。
         g.requests = new_requests;
-        g.tokens = new_tokens;
-        g.unknown_tokens = new_unknown;
+        g.tokens.add_counts(&event_tokens);
+        if let Some(delta) = unknown_delta {
+            g.unknown_tokens.add_counts(&delta);
+        }
         g.cost_usd = new_cost;
         // v0.9.1 缺陷 C：请求明细贡献——占位 "detail"（不序列化，纯明细组
         // 输出与旧契约逐字节一致）；日汇总贡献到来时由它升级 mixed。
@@ -567,7 +561,7 @@ fn push_event_into(
         // unknown token 为 0、金额来自真实单价，不得触发「含未计价 token」。
         // 后续完整计价的事件不得清掉已置位的标记。
         g.unknown_pricing = match &estimate {
-            Some(est) => g.unknown_pricing || est.unknown.total() > 0,
+            Some(est) => g.unknown_pricing || !est.unknown.is_zero(),
             None => true,
         };
         g.cache_write_split_estimated |= estimate
@@ -690,32 +684,40 @@ fn push_rollup_into(
             acc.representative = Some(r.model.clone());
         }
         let g = &mut acc.group;
-        g.requests = g
+        let new_requests = g
             .requests
             .checked_add(r.requests)
             .ok_or_else(|| anyhow::anyhow!("分组 {key_err} 的请求数累计超出可表示范围"))?;
-        g.tokens = g
-            .tokens
-            .checked_add(&r.tokens)
-            .ok_or_else(|| anyhow::anyhow!("分组 {key_err} 的 token 累计超出可表示范围"))?;
         // v0.9.2（2026-11-15，用户更正旧规则）：费用覆盖逐条判定——规则见
         // [`rollup_cost_parts`]。聚合与下钻日汇总行共用同一函数，两个视图的
         // 金额/未知 token/估算标记逐项一致（v0.9.4）。
         let parts = rollup_cost_parts(r, pricing);
-        acc.has_estimated_cost |= parts.has_estimated_cost;
-        g.cost_usd += parts.cost_usd;
-        if !g.cost_usd.is_finite() {
+        let new_cost = g.cost_usd + parts.cost_usd;
+        if !new_cost.is_finite() {
             anyhow::bail!("分组 {key_err} 的费用累计出现非有限值");
         }
-        g.unknown_tokens = g
-            .unknown_tokens
-            .checked_add(&parts.unknown_tokens)
-            .ok_or_else(|| anyhow::anyhow!("分组 {key_err} 的未知 token 累计超出可表示范围"))?;
+        let new_source_cost = if let Some(cost) = r.source_cost_usd {
+            if !cost.is_finite() {
+                anyhow::bail!("分组 {key_err} 的来源费用出现非有限值");
+            }
+            let summed = g.source_cost_usd.unwrap_or(0.0) + cost;
+            if !summed.is_finite() {
+                anyhow::bail!("分组 {key_err} 的来源费用累计出现非有限值");
+            }
+            Some(summed)
+        } else {
+            g.source_cost_usd
+        };
+        g.requests = new_requests;
+        g.tokens.add_counts(&r.tokens);
+        acc.has_estimated_cost |= parts.has_estimated_cost;
+        g.cost_usd = new_cost;
+        g.unknown_tokens.add_counts(&parts.unknown_tokens);
         g.cache_write_split_estimated |= parts.cache_write_split_estimated;
         g.cache_price_zero_estimated |= parts.cache_price_zero_estimated;
         // unknown_pricing 只在实际存在未获费用覆盖的 token 时置位；纯明细
-        // 的缺价由 push_event_into 置位。这里按本组 unknown 是否增长判定。
-        if g.unknown_tokens.total() > 0 {
+        // 的缺价由 push_event_into 置位。这里按本组 unknown 是否非零判定。
+        if !g.unknown_tokens.is_zero() {
             g.unknown_pricing = true;
             if g.unknown_reason.is_none() {
                 g.unknown_reason = Some("rollup_only");
@@ -753,16 +755,7 @@ fn push_rollup_into(
             // 多披露不可漏披露），不 panic。
             (Some(_), _) => "partial",
         });
-        if let Some(cost) = r.source_cost_usd {
-            if !cost.is_finite() {
-                anyhow::bail!("分组 {key_err} 的来源费用出现非有限值");
-            }
-            let summed = g.source_cost_usd.unwrap_or(0.0) + cost;
-            if !summed.is_finite() {
-                anyhow::bail!("分组 {key_err} 的来源费用累计出现非有限值");
-            }
-            g.source_cost_usd = Some(summed);
-        }
+        g.source_cost_usd = new_source_cost;
         if RECORD_AGENTS && !g.agents.contains(&r.app.as_str()) {
             g.agents.push(r.app.as_str());
         }
@@ -820,13 +813,18 @@ impl AggregateState {
         // `has_estimated_cost`（有使用中的 token 获得估算覆盖，含零元费率）
         // 或来源费用存在；「找到候选」和「金额非零」都不算依据。
         for g in &mut groups {
-            let unknown_total = g.unknown_tokens.total();
             g.total_cost_usd = match (g.has_estimated_cost, g.source_cost_usd) {
-                (_, Some(src)) => Some(g.cost_usd + src),
+                (_, Some(src)) => {
+                    let combined = g.cost_usd + src;
+                    if !combined.is_finite() {
+                        anyhow::bail!("分组 {} 的合并费用出现非有限值", g.key);
+                    }
+                    Some(combined)
+                }
                 (true, None) => Some(g.cost_usd),
                 (false, None) => None,
             };
-            g.cost_partially_unknown = unknown_total > 0;
+            g.cost_partially_unknown = !g.unknown_tokens.is_zero();
         }
         let mut totals = Group {
             key: "合计".to_string(),
@@ -838,10 +836,7 @@ impl AggregateState {
                 .requests
                 .checked_add(g.requests)
                 .ok_or_else(|| anyhow::anyhow!("总计请求数累计超出可表示范围"))?;
-            totals.tokens = totals
-                .tokens
-                .checked_add(&g.tokens)
-                .ok_or_else(|| anyhow::anyhow!("总计 token 累计超出可表示范围"))?;
+            totals.tokens.add_big(&g.tokens);
             totals.cost_usd += g.cost_usd;
             if !totals.cost_usd.is_finite() {
                 anyhow::bail!("总计费用累计出现非有限值");
@@ -886,10 +881,7 @@ impl AggregateState {
             if totals.unknown_reason.is_none() {
                 totals.unknown_reason = g.unknown_reason;
             }
-            totals.unknown_tokens = totals
-                .unknown_tokens
-                .checked_add(&g.unknown_tokens)
-                .ok_or_else(|| anyhow::anyhow!("总计未知 token 累计超出可表示范围"))?;
+            totals.unknown_tokens.add_big(&g.unknown_tokens);
             for a in &g.agents {
                 if !totals.agents.contains(a) {
                     totals.agents.push(a);
@@ -910,11 +902,17 @@ impl AggregateState {
         // 行同规则——按实际覆盖判定，零元费率覆盖显示 $0.00，全部实际用量
         // 缺价显示 None）。
         totals.total_cost_usd = match (totals.has_estimated_cost, totals.source_cost_usd) {
-            (_, Some(src)) => Some(totals.cost_usd + src),
+            (_, Some(src)) => {
+                let combined = totals.cost_usd + src;
+                if !combined.is_finite() {
+                    anyhow::bail!("总计合并费用出现非有限值");
+                }
+                Some(combined)
+            }
             (true, None) => Some(totals.cost_usd),
             (false, None) => None,
         };
-        totals.cost_partially_unknown = totals.unknown_tokens.total() > 0;
+        totals.cost_partially_unknown = !totals.unknown_tokens.is_zero();
         groups.push(totals.clone());
         Ok(Aggregated {
             by: by.as_str(),
