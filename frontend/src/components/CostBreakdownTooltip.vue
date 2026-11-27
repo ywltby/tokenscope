@@ -15,6 +15,7 @@ import { NTooltip } from "naive-ui";
 import { formatCostBreakdownRows, isRequestFullyUnpriced } from "../lib/costBreakdown";
 import { formatMoney } from "../lib/formatMoney";
 import { UNIT_PRICE_DENOMINATOR } from "../lib/tokenDisplay";
+import { toTokenBigInt } from "../lib/tokenUsage";
 import { t } from "../lib/translate";
 import type { EventCostBreakdown } from "../types";
 
@@ -39,7 +40,7 @@ const emit = defineEmits<{
 
 const unpriced = computed(() => isRequestFullyUnpriced(props.breakdown.lines));
 const hasUnpriced = computed(() =>
-  props.breakdown.lines.some((line) => line.tokens > 0 && !line.priced),
+  props.breakdown.lines.some((line) => toTokenBigInt(line.tokens) > 0n && !line.priced),
 );
 const displayCost = computed(() => formatMoney(unpriced.value ? null : props.cost, "request"));
 const ariaLabel = computed(() => t("cost.ariaLabel", { cost: displayCost.value }));
@@ -153,5 +154,15 @@ function renderContent(): ReturnType<typeof h> {
 }
 .cost-unpriced {
   color: var(--ts-warning);
+}
+</style>
+
+<style>
+/* 浮层内容经 NTooltip teleport 到 body，不带 scoped 属性；允许超长计价公式与
+   20 位 token 整数在窄视口下折行，覆盖全局 .ts-num 的 white-space: nowrap。 */
+.cost-tooltip .bd-value {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 </style>

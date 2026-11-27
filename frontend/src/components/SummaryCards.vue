@@ -9,8 +9,15 @@ import { computed, onBeforeUnmount, onMounted, ref, useId } from "vue";
 import { NTooltip } from "naive-ui";
 import { fmtNum, type Group } from "../types";
 import { costDisplayText } from "../lib/costDisplay";
+import { formatSummaryTokenUnit } from "../lib/formatTokens";
 import { TOKEN_BUCKETS } from "../lib/tokenDisplay";
-import { totalInput, totalTokens } from "../lib/tokenUsage";
+import {
+  percentageFixed2BigInt,
+  ratioPercentBigInt,
+  toTokenBigInt,
+  totalInput,
+  totalTokens,
+} from "../lib/tokenUsage";
 import { useT } from "../lib/i18n";
 import GroupCostBreakdownTooltip from "./GroupCostBreakdownTooltip.vue";
 
@@ -19,11 +26,65 @@ const t = useT();
 const props = defineProps<{ totals: Group }>();
 
 const total = computed(() => totalTokens(props.totals.tokens));
-const wan = computed(() => (total.value / 1e4).toFixed(2));
+const totalText = computed(() => fmtNum(total.value));
+// 按千分位逗号切分，用于在极长整数（20~30+ 位）必须换行时只从逗号后断行（<wbr>
+// 不产生多余字符，拖选复制与 textContent 仍为连续精确数字）。
+const totalChunks = computed(() => totalText.value.split(/(?<=,)/));
+const totalSizeClass = computed(() => {
+  const len = totalText.value.length;
+  if (len >= 27) return "metric-value-xlong";
+  if (len >= 19) return "metric-value-long";
+  return "";
+});
+const tokenUnit = computed(() => formatSummaryTokenUnit(total.value));
+
+const copied = ref(false);
+let copyTimer: ReturnType<typeof setTimeout> | null = null;
+function clearCopyTimer(): void {
+  if (copyTimer != null) {
+    clearTimeout(copyTimer);
+    copyTimer = null;
+  }
+}
+async function copyExactTotal(): Promise<void> {
+  const raw = total.value.toString();
+  let ok = false;
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(raw);
+      ok = true;
+    }
+  } catch {
+    ok = false;
+  }
+  if (!ok && typeof document !== "undefined") {
+    const el = document.createElement("textarea");
+    el.value = raw;
+    el.setAttribute("readonly", "");
+    el.style.position = "fixed";
+    el.style.opacity = "0";
+    document.body.appendChild(el);
+    el.select();
+    try {
+      ok = document.execCommand("copy");
+    } catch {
+      ok = false;
+    }
+    document.body.removeChild(el);
+  }
+  if (ok) {
+    copied.value = true;
+    clearCopyTimer();
+    copyTimer = setTimeout(() => {
+      copied.value = false;
+      copyTimer = null;
+    }, 1500);
+  }
+}
 const hitRate = computed(() => {
   const base = totalInput(props.totals.tokens);
-  if (base === 0) return null;
-  return (props.totals.tokens.cache_read / base) * 100;
+  if (base === 0n) return null;
+  return ratioPercentBigInt(toTokenBigInt(props.totals.tokens.cache_read), base);
 });
 
 // UX07：汇总金额走单一入口（含 $、微小非零保护）。
@@ -71,7 +132,10 @@ function onDocumentClick(e: MouseEvent): void {
   closeHitTip();
 }
 onMounted(() => document.addEventListener("click", onDocumentClick));
-onBeforeUnmount(() => document.removeEventListener("click", onDocumentClick));
+onBeforeUnmount(() => {
+  document.removeEventListener("click", onDocumentClick);
+  clearCopyTimer();
+});
 
 // UX07/RC06：四类分项名称与顺序来自 tokenDisplay 单一来源（不再各自硬编码）。
 // 2026-10-10 用户修订：英雄栏恢复**互斥四桶**口径——「输入」= 未缓存输入，
@@ -80,7 +144,7 @@ const parts = computed(() =>
   TOKEN_BUCKETS.map((b) => ({
     kind: b.key,
     label: b.label,
-    value: props.totals.tokens[b.key],
+    value: toTokenBigInt(props.totals.tokens[b.key]),
   })),
 );
 </script>
@@ -112,19 +176,80 @@ const parts = computed(() =>
 
       <!-- 次读数：总 token / 请求数 / 缓存命中率，发丝线分隔 -->
       <div class="metric-secondary">
-        <div class="metric-item">
-          <div class="metric-label">{{ t("dashboard.totalTokens") }}</div>
-          <div class="metric-value ts-num">{{ fmtNum(total) }}</div>
-          <div class="metric-unit">{{ t("dashboard.tokensWan", { wan }) }}</div>
+        <div class="metric-item metric-item-tokens">
+          <div class="metric-label metric-label-row">
+            <span>{{ t("dashboard.totalTokens") }}</span>
+            <button
+              type="button"
+              class="copy-total-btn ts-focusable"
+              :aria-label="
+                copied ? t('dashboard.copiedExactTokens') : t('dashboard.copyExactTokens')
+              "
+              :title="copied ? t('dashboard.copiedExactTokens') : t('dashboard.copyExactTokens')"
+              @click="copyExactTotal"
+            >
+              <svg
+                v-if="!copied"
+                class="copy-icon"
+                viewBox="0 0 16 16"
+                fill="none"
+                aria-hidden="true"
+              >
+                <rect
+                  x="5.25"
+                  y="5.25"
+                  width="8.5"
+                  height="8.5"
+                  rx="1.75"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                />
+                <path
+                  d="M3.75 10.75H3.5A1.75 1.75 0 0 1 1.75 9V3.5A1.75 1.75 0 0 1 3.5 1.75H9A1.75 1.75 0 0 1 10.75 3.5v.25"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                />
+              </svg>
+              <svg
+                v-else
+                class="copy-icon copy-icon-done"
+                viewBox="0 0 16 16"
+                fill="none"
+                aria-hidden="true"
+              >
+                <path
+                  d="M3.25 8.5 6.5 11.75 12.75 4.5"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              <span v-if="copied" class="copy-feedback">{{
+                t("dashboard.copiedExactTokens")
+              }}</span>
+            </button>
+          </div>
+          <div
+            class="metric-value metric-value-tokens ts-num"
+            :class="totalSizeClass"
+            :title="totalText"
+          >
+            <template v-for="(chunk, idx) in totalChunks" :key="idx"
+              ><wbr v-if="idx > 0" /><span class="num-chunk">{{ chunk }}</span></template
+            >
+          </div>
+          <div class="metric-unit ts-num">{{ tokenUnit }}</div>
         </div>
         <div class="metric-sep" aria-hidden="true" />
-        <div class="metric-item">
+        <div class="metric-item metric-item-requests">
           <div class="metric-label">{{ t("dashboard.requests") }}</div>
           <div class="metric-value ts-num">{{ fmtNum(totals.requests) }}</div>
           <div class="metric-unit">{{ t("dashboard.requestsUnit") }}</div>
         </div>
         <div class="metric-sep" aria-hidden="true" />
-        <div class="metric-item">
+        <div class="metric-item metric-item-hit">
           <NTooltip placement="bottom" trigger="manual" :show="hitTipOpen">
             <template #trigger>
               <!-- RC06：原生 button + 局部外观重置；Enter/Space 由浏览器内建
@@ -167,13 +292,13 @@ const parts = computed(() =>
 
     <!-- 分项比例条：6px 高、3px 圆角、按互斥四桶占比分段（全零为空槽） -->
     <div class="parts-bar-container">
-      <div v-if="total > 0" class="parts-bar" role="img" :aria-label="t('dashboard.partsBarAria')">
+      <div v-if="total > 0n" class="parts-bar" role="img" :aria-label="t('dashboard.partsBarAria')">
         <span
           v-for="p in parts"
           :key="p.kind"
           class="bar-segment"
           :class="`bar-${p.kind}`"
-          :style="{ width: `${((p.value / total) * 100).toFixed(2)}%` }"
+          :style="{ width: `${percentageFixed2BigInt(p.value, total)}%` }"
           :aria-label="`${p.label} ${fmtNum(p.value)}`"
         />
       </div>
@@ -194,25 +319,41 @@ const parts = computed(() =>
 <style scoped>
 .metric-row {
   display: flex;
-  gap: var(--ts-space-6);
+  flex-wrap: wrap;
+  gap: var(--ts-space-5) var(--ts-space-6);
   align-items: flex-start;
 }
 
 .metric-main {
   flex: 0 0 auto;
   min-width: 200px;
+  max-width: 100%;
 }
 
 .metric-secondary {
-  flex: 1;
+  flex: 1 1 560px;
+  min-width: 0;
   display: flex;
   gap: var(--ts-space-4);
   align-items: flex-start;
 }
 
 .metric-item {
-  flex: 1;
+  flex: 1 1 0;
   min-width: 0;
+}
+
+/* 总 token 列比请求数/命中率更宽：为 20~30+ 位大数留足空间，避免挤占兄弟列 */
+.metric-item-tokens {
+  flex: 1.85 1 0;
+}
+
+.metric-item-requests {
+  flex: 0.9 1 0;
+}
+
+.metric-item-hit {
+  flex: 0.85 1 0;
 }
 
 /* 发丝线分隔（DESIGN.md §5 指标卡） */
@@ -265,10 +406,78 @@ const parts = computed(() =>
   white-space: nowrap;
 }
 
+/* 总 token 支持任意长度大整数：常规长度保持 26px 单行；20 位缩至 21px 单行；
+   30+ 位缩至 17px 并按千分位逗号优雅折行，绝不溢出栏位且保持可拖选与一键复制。 */
+.metric-value-tokens {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+  user-select: text;
+}
+
+.metric-value-long {
+  font-size: 21px;
+  line-height: 1.25;
+}
+
+.metric-value-xlong {
+  font-size: 17px;
+  line-height: 1.3;
+}
+
+.num-chunk {
+  display: inline;
+  white-space: nowrap;
+}
+
+.metric-label-row {
+  gap: 6px;
+}
+
+.copy-total-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--ts-text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 4px;
+  margin: -2px 0;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+
+.copy-total-btn:hover {
+  color: var(--ts-text);
+  background: var(--ts-fill);
+}
+
+.copy-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.copy-icon-done,
+.copy-feedback {
+  color: var(--ts-success, #34c759);
+  font-size: 11px;
+  font-weight: 500;
+}
+
 /* 主读数（估算费用）44px/600，用主文字色不染强调色 */
 .metric-value-main {
   font-size: 44px;
   letter-spacing: -0.03em;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* T2：来源记录费用独立行（估算费用下方），不得与主估算混同。 */
@@ -345,7 +554,10 @@ const parts = computed(() =>
 .legend-item {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--ts-space-2);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .legend-dot {
@@ -374,6 +586,10 @@ const parts = computed(() =>
 .legend-value {
   color: var(--ts-text);
   font-weight: 600;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* 窄窗口：主读数与次读数纵向堆叠 */
@@ -383,6 +599,7 @@ const parts = computed(() =>
     gap: var(--ts-space-5);
   }
   .metric-secondary {
+    flex: 0 0 auto;
     width: 100%;
   }
 }

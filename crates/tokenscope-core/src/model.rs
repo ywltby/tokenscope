@@ -1,7 +1,9 @@
 //! 归一化用量事件与 token 计数：source 层输出 `UsageEvent` 后，下游只认这里的类型。
 
 use jiff::Timestamp;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+use crate::bigint::BigUint;
 
 /// 「无项目归属」哨兵：聚合分组键、明细行兜底与下钻筛选共用同一判定。
 ///
@@ -136,8 +138,19 @@ pub struct UsageEvent {
 }
 
 impl UsageEvent {
+    /// 四桶精确合计（`u128` 恒不溢出）。
+    pub fn total_tokens_u128(&self) -> u128 {
+        u128::from(self.input_tokens)
+            + u128::from(self.output_tokens)
+            + u128::from(self.cache_write_tokens)
+            + u128::from(self.cache_read_tokens)
+    }
+
     pub fn total_tokens(&self) -> u64 {
-        self.input_tokens + self.output_tokens + self.cache_write_tokens + self.cache_read_tokens
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_write_tokens)
+            .saturating_add(self.cache_read_tokens)
     }
 
     /// SF08：单事件桶边界校验（source→model 公共边界，两适配器与缓存
@@ -385,13 +398,19 @@ impl UsageEvent {
 /// 构成，任何累计口径都不得把分项再加进 `cache_write`/总量。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct TokenCounts {
+    #[serde(serialize_with = "crate::bigint::serialize_u64_safe")]
     pub input: u64,
+    #[serde(serialize_with = "crate::bigint::serialize_u64_safe")]
     pub output: u64,
+    #[serde(serialize_with = "crate::bigint::serialize_u64_safe")]
     pub cache_write: u64,
+    #[serde(serialize_with = "crate::bigint::serialize_u64_safe")]
     pub cache_read: u64,
     /// N18：5 分钟缓存写分项（`cache_write_split_known == false` 时恒 0）。
+    #[serde(serialize_with = "crate::bigint::serialize_u64_safe")]
     pub cache_write_5m: u64,
     /// N18：1 小时缓存写分项（同上）。
+    #[serde(serialize_with = "crate::bigint::serialize_u64_safe")]
     pub cache_write_1h: u64,
     /// N18：分项可信（逐事件 AND 语义：聚合中混入任一未知分档事件即整体未知）。
     pub cache_write_split_known: bool,
@@ -413,8 +432,19 @@ impl TokenCounts {
     /// Task 1（分段计价）：prompt token 度量 = 非缓存输入 + 缓存写 + 缓存读
     /// （输出不参与上下文档位选择——不变量 2）。N18：写总量已含两档分项，
     /// prompt 基数不再另加分项（不得重复计入）。
+    ///
+    /// 单条请求在写入/解析边界已受检 `<= u64::MAX`，这里饱和相加与精确和等价；
+    /// 日汇总行四桶各自合法但合计可能超过 `u64::MAX`（如多桶各为 `i64::MAX`），
+    /// 饱和到 `u64::MAX` 既防 panic/回绕，对 `u64` 分段阈值上界判定依然精确。
     pub fn prompt_tokens(&self) -> u64 {
-        self.input + self.cache_write + self.cache_read
+        self.input
+            .saturating_add(self.cache_write)
+            .saturating_add(self.cache_read)
+    }
+
+    /// 四桶是否全为零（永不溢出）。
+    pub fn is_zero(&self) -> bool {
+        self.is_empty_counts()
     }
 
     /// 是否尚未累计任何 token（全零）。用于分档可信标志的「首条定值、
@@ -458,8 +488,19 @@ impl TokenCounts {
         }
     }
 
+    /// 四桶精确合计（`u128` 恒不溢出，适合单日汇总等四桶和可能超 `u64::MAX` 的路径）。
+    pub fn total_u128(&self) -> u128 {
+        u128::from(self.input)
+            + u128::from(self.output)
+            + u128::from(self.cache_write)
+            + u128::from(self.cache_read)
+    }
+
     pub fn total(&self) -> u64 {
-        self.input + self.output + self.cache_write + self.cache_read
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_write)
+            .saturating_add(self.cache_read)
     }
 
     /// SF08：受检累加——任一桶溢出返回 None（聚合层据此整体报错，
@@ -485,6 +526,126 @@ impl TokenCounts {
             cache_write_1h: self.cache_write_1h.checked_add(other.cache_write_1h)?,
             cache_write_split_known: split_known,
         })
+    }
+}
+
+/// 聚合层任意精度四桶计数（无限长度，永不溢出 `u64`）。
+///
+/// 与单条事件 [`TokenCounts`]（`u64`）分离：单条请求仍受 `u64` 与守恒校验约束，
+/// 分组与总计累计则使用 [`BigUint`] 支持无限长度汇总；JSON 序列化在 `<= 2^53 - 1`
+/// 时保持数字，超出后自动切换为十进制字符串以防前端 `JSON.parse` 丢精度。
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BigTokenCounts {
+    pub input: BigUint,
+    pub output: BigUint,
+    pub cache_write: BigUint,
+    pub cache_read: BigUint,
+    pub cache_write_5m: BigUint,
+    pub cache_write_1h: BigUint,
+    pub cache_write_split_known: bool,
+}
+
+impl BigTokenCounts {
+    pub fn is_zero(&self) -> bool {
+        self.input.is_zero()
+            && self.output.is_zero()
+            && self.cache_write.is_zero()
+            && self.cache_read.is_zero()
+    }
+
+    /// 六个大整数字段的额外堆字节总和（常规 `u64` 范围内恒为 0，供 RC05 记账）。
+    pub fn heap_bytes(&self) -> usize {
+        self.input
+            .heap_bytes()
+            .saturating_add(self.output.heap_bytes())
+            .saturating_add(self.cache_write.heap_bytes())
+            .saturating_add(self.cache_read.heap_bytes())
+            .saturating_add(self.cache_write_5m.heap_bytes())
+            .saturating_add(self.cache_write_1h.heap_bytes())
+    }
+
+    pub fn total(&self) -> BigUint {
+        let mut sum = self.input.clone();
+        sum += &self.output;
+        sum += &self.cache_write;
+        sum += &self.cache_read;
+        sum
+    }
+
+    /// 累加单条/单日 `TokenCounts`（无限精度，永不溢出）；沿用 N18「首条定值、其后 AND」规则。
+    pub fn add_counts(&mut self, other: &TokenCounts) {
+        let self_empty = self.is_zero();
+        let other_empty = other.is_empty_counts();
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_write += other.cache_write;
+        self.cache_read += other.cache_read;
+        self.cache_write_5m += other.cache_write_5m;
+        self.cache_write_1h += other.cache_write_1h;
+        self.cache_write_split_known = if self_empty {
+            other.cache_write_split_known
+        } else if other_empty {
+            self.cache_write_split_known
+        } else {
+            self.cache_write_split_known && other.cache_write_split_known
+        };
+    }
+
+    /// 累加另一组聚合计数（无限精度，永不溢出）；沿用 N18「首条定值、其后 AND」规则。
+    pub fn add_big(&mut self, other: &BigTokenCounts) {
+        let self_empty = self.is_zero();
+        let other_empty = other.is_zero();
+        self.input += &other.input;
+        self.output += &other.output;
+        self.cache_write += &other.cache_write;
+        self.cache_read += &other.cache_read;
+        self.cache_write_5m += &other.cache_write_5m;
+        self.cache_write_1h += &other.cache_write_1h;
+        self.cache_write_split_known = if self_empty {
+            other.cache_write_split_known
+        } else if other_empty {
+            self.cache_write_split_known
+        } else {
+            self.cache_write_split_known && other.cache_write_split_known
+        };
+    }
+}
+
+impl From<&TokenCounts> for BigTokenCounts {
+    fn from(c: &TokenCounts) -> Self {
+        Self {
+            input: BigUint::from(c.input),
+            output: BigUint::from(c.output),
+            cache_write: BigUint::from(c.cache_write),
+            cache_read: BigUint::from(c.cache_read),
+            cache_write_5m: BigUint::from(c.cache_write_5m),
+            cache_write_1h: BigUint::from(c.cache_write_1h),
+            cache_write_split_known: c.cache_write_split_known,
+        }
+    }
+}
+
+impl From<TokenCounts> for BigTokenCounts {
+    fn from(c: TokenCounts) -> Self {
+        Self::from(&c)
+    }
+}
+
+impl PartialEq<TokenCounts> for BigTokenCounts {
+    fn eq(&self, other: &TokenCounts) -> bool {
+        self.input == other.input
+            && self.output == other.output
+            && self.cache_write == other.cache_write
+            && self.cache_read == other.cache_read
+            && self.cache_write_5m == other.cache_write_5m
+            && self.cache_write_1h == other.cache_write_1h
+            && self.cache_write_split_known == other.cache_write_split_known
+    }
+}
+
+impl PartialEq<BigTokenCounts> for TokenCounts {
+    fn eq(&self, other: &BigTokenCounts) -> bool {
+        other == self
     }
 }
 

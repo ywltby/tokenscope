@@ -4,6 +4,7 @@
 import { fmtNum } from "../types";
 import { formatMoney } from "./formatMoney";
 import { TOKEN_BUCKETS, UNIT_PRICE_SUFFIX_AFTER_AMOUNT, tokenBucketLabel } from "./tokenDisplay";
+import { toTokenBigInt } from "./tokenUsage";
 import { t } from "./translate";
 import type { CostLine, CostLineKind, EventCostBreakdown, MatchMode } from "../types";
 
@@ -57,17 +58,17 @@ function fmtMoney(v: number): string {
  *  可信分档事件把写入拆成 5m/1h 两行（无合并行）——算式必须显示**两档
  *  之和**；只有合并行时才用合并值。两行都缺（候选未声明分档、写入整体
  *  未知）时回落合并值；分档行与合并行都不存在则为 0。绝不重复计数。 */
-function cacheWriteTokens(bd: EventCostBreakdown): number {
+function cacheWriteTokens(bd: EventCostBreakdown): bigint {
   const split = bd.lines.filter((l) => l.kind === "cache_write_5m" || l.kind === "cache_write_1h");
-  if (split.length > 0) return split.reduce((sum, l) => sum + l.tokens, 0);
-  return bd.lines.find((l) => l.kind === "cache_write")?.tokens ?? 0;
+  if (split.length > 0) return split.reduce((sum, l) => sum + toTokenBigInt(l.tokens), 0n);
+  return toTokenBigInt(bd.lines.find((l) => l.kind === "cache_write")?.tokens);
 }
 
 function factRows(bd: EventCostBreakdown): BreakdownRow[] {
   const m = bd.matched;
-  const input = bd.lines.find((l) => l.kind === "input")?.tokens ?? 0;
+  const input = toTokenBigInt(bd.lines.find((l) => l.kind === "input")?.tokens);
   const cw = cacheWriteTokens(bd);
-  const cr = bd.lines.find((l) => l.kind === "cache_read")?.tokens ?? 0;
+  const cr = toTokenBigInt(bd.lines.find((l) => l.kind === "cache_read")?.tokens);
   const rows: BreakdownRow[] = [
     { label: t("cost.matchedModel"), value: m.raw_key },
     { label: t("cost.channel"), value: m.channel ?? t("cost.noData") },
@@ -78,7 +79,7 @@ function factRows(bd: EventCostBreakdown): BreakdownRow[] {
         input: fmtNum(input),
         cacheWrite: `${tokenBucketLabel("cache_write")} ${fmtNum(cw)}`,
         cacheRead: `${tokenBucketLabel("cache_read")} ${fmtNum(cr)}`,
-        total: fmtNum(bd.basis_value),
+        total: fmtNum(toTokenBigInt(bd.basis_value)),
       }),
     },
     { label: t("cost.hitSegment"), value: bd.segment_label ?? t("cost.baseSegment") },
@@ -94,20 +95,21 @@ function factRows(bd: EventCostBreakdown): BreakdownRow[] {
 
 function formulaRows(lines: CostLine[]): BreakdownRow[] {
   return lines.map((l) => {
+    const tokens = toTokenBigInt(l.tokens);
     if (l.overflow) {
       // F04：单价已知但 token × 单价超出可表示范围——分项不计金额、
       // token 保留为未计价；不得显示为免费或 $0。
       return {
         label: kindLabel(l.kind),
-        value: t("cost.overflowValue", { tokens: fmtNum(l.tokens) }),
+        value: t("cost.overflowValue", { tokens: fmtNum(tokens) }),
         unknown: true,
       };
     }
     if (!l.priced || l.unit_price == null) {
       return {
         label: kindLabel(l.kind),
-        value: t("cost.missingUnit", { tokens: fmtNum(l.tokens) }),
-        unknown: l.tokens > 0,
+        value: t("cost.missingUnit", { tokens: fmtNum(tokens) }),
+        unknown: tokens > 0n,
       };
     }
     // same_as_input：单价来自同层输入价（unit_price 已由后端解析为实际数值），
@@ -118,7 +120,7 @@ function formulaRows(lines: CostLine[]): BreakdownRow[] {
       return {
         label: kindLabel(l.kind),
         value: t("cost.assumedZeroLine", {
-          tokens: fmtNum(l.tokens),
+          tokens: fmtNum(tokens),
           amount: fmtMoney(l.subtotal),
         }),
         unknown: true,
@@ -132,7 +134,7 @@ function formulaRows(lines: CostLine[]): BreakdownRow[] {
       label: kindLabel(l.kind),
       // RC07：单位来自 tokenDisplay 的单一来源（不再各处自造 "/M" 字面量），
       // 完整量纲在浮层内另有说明（USD / 1M token）。金额仍来自后端 DTO。
-      value: `${fmtNum(l.tokens)} × ${unit}${UNIT_PRICE_SUFFIX_AFTER_AMOUNT} = ${fmtMoney(l.subtotal)}`,
+      value: `${fmtNum(tokens)} × ${unit}${UNIT_PRICE_SUFFIX_AFTER_AMOUNT} = ${fmtMoney(l.subtotal)}`,
     };
   });
 }
@@ -140,13 +142,14 @@ function formulaRows(lines: CostLine[]): BreakdownRow[] {
 /** 以实际用量的费用依据判定，而非候选是否存在或已计价小计是否为零。 */
 export function isRequestFullyUnpriced(lines: CostLine[]): boolean {
   return (
-    lines.some((l) => l.tokens > 0 && !l.priced) && !lines.some((l) => l.tokens > 0 && l.priced)
+    lines.some((l) => toTokenBigInt(l.tokens) > 0n && !l.priced) &&
+    !lines.some((l) => toTokenBigInt(l.tokens) > 0n && l.priced)
   );
 }
 
 function resultRows(bd: EventCostBreakdown): BreakdownRow[] {
   const rows: BreakdownRow[] = [];
-  const unpriced = bd.lines.filter((l) => !l.priced && l.tokens > 0);
+  const unpriced = bd.lines.filter((l) => !l.priced && toTokenBigInt(l.tokens) > 0n);
   if (isRequestFullyUnpriced(bd.lines)) {
     // 完全未知：不得显示 $0.00
     rows.push({

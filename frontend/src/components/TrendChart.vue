@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 设计系统 Task 4：趋势图接入统一图表主题（固定语义色/顺序，禁用默认
-// 调色板）；模型图按当前可见类别预留逐行空间，其他维度保持总览布局。
+// 调色板）；非时间维度（模型 / 项目 / 应用）按当前可见类别预留逐行空间，
+// 按时间保持总览布局。
 // 聚合口径不变：分类与 series 仍由 buildBarChartData 单源生成（F03）。
 //
 // UX05（界面审查修复）：实例生命周期与数据更新分离——
@@ -17,25 +18,27 @@ import { useTheme } from "../composables/theme";
 import { useTokenColors } from "../composables/tokenColors";
 import { fmtNum, type Group } from "../types";
 import { buildBarChartData, tooltipLabels } from "../lib/chartData";
+import {
+  AXIS_LABEL_FONT_SIZE,
+  AXIS_LABEL_MARGIN,
+  GRID_BOTTOM_HORIZONTAL,
+  GRID_RIGHT_HORIZONTAL,
+  GRID_TOP_HORIZONTAL,
+  computeCategoryLabelLayout,
+  resolveAxisFontFamily,
+  type CategoryLabelLayout,
+} from "../lib/chartLabelLayout";
 import { buildTooltipNode } from "../lib/chartTooltip";
+import { formatCompactTokenAxis } from "../lib/formatTokens";
 import { chartTokens, POPOVER_BLUR_CSS } from "../styles/chartTheme";
 import { t, useAppLocale } from "../lib/i18n";
 
 const { locale } = useAppLocale();
 
-/// 数值轴紧凑刻度（token 数）：中文按万/亿，英文按 K/M/B。
-/// 只改刻度的显示单位，不改任何数值或统计口径。
-function fmtCompact(v: number): string {
-  const a = Math.abs(v);
-  if (locale.value === "en-US") {
-    if (a >= 1e9) return `${Number((v / 1e9).toFixed(1))}B`;
-    if (a >= 1e6) return `${Number((v / 1e6).toFixed(1))}M`;
-    if (a >= 1e3) return `${Number((v / 1e3).toFixed(1))}K`;
-    return String(v);
-  }
-  if (a >= 1e8) return `${Number((v / 1e8).toFixed(1))}亿`;
-  if (a >= 1e4) return `${Number((v / 1e4).toFixed(0))}万`;
-  return String(v);
+/// 数值轴紧凑刻度（token 数）：与总览卡片共用同一量级表（中文 万/亿/万亿/科学计数法，
+/// 英文 K/M/B/T/科学计数法），只改刻度展示单位，不改任何数值或统计口径。
+function fmtCompact(v: number, scalePow10 = 0): string {
+  return formatCompactTokenAxis(v, scalePow10);
 }
 
 const props = defineProps<{ groups: Group[]; by: string }>();
@@ -52,6 +55,8 @@ let observer: ResizeObserver | null = null;
 /// 不再当作已应用尺寸。
 let appliedWidth = 0;
 let appliedHeight = 0;
+let appliedGridLeft = 0;
+let appliedLabelBudget = 0;
 /// 布局/数据统一更新：同一轮内的数据、维度与尺寸变化只下发一次。
 type PendingKind = "data" | "dimension" | "layout";
 /// v0.9.1（缺陷 A）：KeepAlive 保留的页面隐藏时容器不可测量，任何
@@ -74,34 +79,21 @@ const titleText = computed(
     })[props.by] ?? t("dashboard.chartFallback"),
 );
 
-/// 模型逐行至少 24 CSS px；80px 留给上下 grid 与数值轴标签。
-/// 用实际类别的离散边界（含两端）计数，不用 count * 百分比估算。
-function canvasHeight(zoom: ZoomRange): number {
-  const count = chartData.value.categories.length;
-  if (props.by !== "model") {
-    return isDay.value ? 360 : Math.min(480, Math.max(320, count * 30 + 70));
-  }
-  const last = Math.max(0, count - 1);
-  const start = zoom.startValue ?? Math.round((last * zoom.start) / 100);
-  const end = zoom.endValue ?? Math.round((last * zoom.end) / 100);
-  // 数据变少时 ECharts 把 value 窗口整体平移进新 extent（保留跨度），不是
-  // 分别截断两端；行数只限于新类别总数，避免随后 observer 再次改高打断动画。
-  const visible = Math.min(
-    count,
-    Math.max(0, Math.floor(Math.max(start, end)) - Math.ceil(Math.min(start, end)) + 1),
+/// 非时间维度（模型 / 项目 / 应用）逐行至少 24 CSS px；80px 留给上下 grid 与数值轴标签。
+/// 同步按实际轴字体逐一测量当前可见范围内的全部标签（禁止抽样），显式计算左侧空间。
+function computeLayout(zoom: ZoomRange, containerWidth?: number): CategoryLabelLayout {
+  const width = containerWidth || el.value?.clientWidth || appliedWidth || 800;
+  return computeCategoryLabelLayout(
+    chartData.value.categories,
+    zoom,
+    width,
+    resolveAxisFontFamily(el.value),
   );
-  return Math.max(320, visible * 24 + 80);
 }
 
-function categoryLabelWidth(): number {
-  const width = el.value?.clientWidth || 800;
-  return props.by === "project" ? Math.min(180, width * 0.2) : Math.min(220, width * 0.25);
-}
-
-function formatCategoryLabel(value: string): string {
-  return props.by === "project"
-    ? echarts.format.truncateText(value, categoryLabelWidth(), "12px sans-serif", "…")
-    : value;
+function canvasHeight(zoom: ZoomRange): number {
+  if (isDay.value) return 360;
+  return computeLayout(zoom).height;
 }
 
 /// 系统减少动态效果时允许取消动画；数值与交互不受影响。
@@ -175,22 +167,29 @@ function bindZoomLayout(zoom: ZoomRange = { start: 0, end: 100 }): void {
     else if (range.startValue != null) zoomMode[0] = "value";
     if (range.end != null) zoomMode[1] = "percent";
     else if (range.endValue != null) zoomMode[1] = "value";
-    if (props.by === "model") flushChart("layout");
+    if (!isDay.value) flushChart("layout");
   });
 }
 
-function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsOption {
+function buildOption(
+  zoom: ZoomRange = { start: 0, end: 100 },
+  layout?: CategoryLabelLayout,
+): echarts.EChartsOption {
   const t = chartTokens(mode.value, overrides.value);
   const groups = props.groups;
   // F03（计划 A4）：分类轴与全部 series 由同一份排序结果生成，标签与数值不错位
-  const { categories, series } = chartData.value;
+  const { categories, series, scalePow10 } = chartData.value;
   // 长标签：轴上省略，tooltip 用展示名（模型维度不能用压缩后的身份键）
   const full = tooltipLabels(groups, props.by);
+  const resolvedLayout = isDay.value ? undefined : (layout ?? computeLayout(zoom));
+  const rawSeriesByName = new Map(series.map((s) => [s.name, s.rawValues]));
   // SF01：tooltip 安全输出——返回 HTMLElement（DOM 分支），原始键只经
   // textNode 写入；模型/项目名可含任意字符（<>&"'、中文、长串）不注入。
+  // 优先取原始任意精度 BigInt，超大聚合量悬浮仍展示完整精确整数。
   const tooltipFormatter = (params: unknown): HTMLElement => {
     const arr = (Array.isArray(params) ? params : [params]) as {
       dataIndex: number;
+      seriesIndex?: number;
       name?: string;
       seriesName: string;
       value: unknown;
@@ -198,7 +197,16 @@ function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsO
     return buildTooltipNode({
       title: full[arr[0]?.dataIndex] ?? null,
       fallbackTitle: arr[0]?.name ?? null,
-      entries: arr.map((p) => ({ seriesName: p.seriesName, value: Number(p.value ?? 0) })),
+      entries: arr.map((p) => {
+        const exact =
+          p.seriesIndex != null
+            ? series[p.seriesIndex]?.rawValues[p.dataIndex]
+            : rawSeriesByName.get(p.seriesName)?.[p.dataIndex];
+        return {
+          seriesName: p.seriesName,
+          value: exact ?? (p.value == null ? null : Number(p.value)),
+        };
+      }),
       formatValue: (v) => fmtNum(v),
     });
   };
@@ -210,24 +218,35 @@ function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsO
     animation: !prefersReducedMotion(),
     tooltip: {
       appendToBody: true,
+      confine: true,
       trigger: "axis",
       backgroundColor: t.tooltipBg,
       borderColor: t.tooltipBorder,
       borderWidth: 1,
       textStyle: { color: t.text },
-      // UX01：ECharts HTML tooltip 走同一浮层配方（16px 模糊 + 12px 圆角）
-      extraCssText: POPOVER_BLUR_CSS,
+      // UX01：ECharts HTML tooltip 走同一浮层配方（16px 模糊 + 12px 圆角）；
+      // 约束最大宽度并允许超长精确整数折行，避免极端大数时浮层冲出视口。
+      extraCssText: `${POPOVER_BLUR_CSS} max-width: min(480px, calc(100vw - 32px)); white-space: normal; overflow-wrap: anywhere;`,
       valueFormatter: (v: unknown) => fmtNum(Number(v ?? 0)),
       formatter: tooltipFormatter,
     },
-    // 图例移至卡片头部（HTML 圆点图例），画布内不再渲染
-    grid: {
-      left: 8,
-      right: isDay.value ? 16 : 64,
-      top: 16,
-      bottom: isDay.value ? 56 : 44,
-      containLabel: true,
-    },
+    // 图例移至卡片头部（HTML 圆点图例），画布内不再渲染；
+    // 非时间维度关闭 containLabel（避免 ECharts 超过 40 行抽样漏测长名），改为全量测量显式预留 grid.left。
+    grid: isDay.value
+      ? {
+          left: 8,
+          right: 16,
+          top: 16,
+          bottom: 56,
+          containLabel: true,
+        }
+      : {
+          left: resolvedLayout!.gridLeft,
+          right: GRID_RIGHT_HORIZONTAL,
+          top: GRID_TOP_HORIZONTAL,
+          bottom: GRID_BOTTOM_HORIZONTAL,
+          containLabel: false,
+        },
     xAxis: isDay.value
       ? {
           type: "category",
@@ -237,29 +256,41 @@ function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsO
         }
       : {
           type: "value",
-          axisLabel: { color: t.textMuted, fontSize: 12, formatter: (v: number) => fmtCompact(v) },
+          axisLabel: {
+            color: t.textMuted,
+            fontSize: 12,
+            formatter: (v: number) => fmtCompact(v, scalePow10),
+          },
           splitLine: { lineStyle: { color: t.splitLine } },
         },
     yAxis: isDay.value
       ? {
           type: "value",
-          axisLabel: { color: t.textMuted, fontSize: 12, formatter: (v: number) => fmtCompact(v) },
+          axisLabel: {
+            color: t.textMuted,
+            fontSize: 12,
+            formatter: (v: number) => fmtCompact(v, scalePow10),
+          },
           splitLine: { lineStyle: { color: t.splitLine } },
         }
       : {
           type: "category",
           inverse: true,
-          // 模型逐行保留标签；项目/应用保持原有密度规则，完整名称见 tooltip。
+          // 非时间维度（模型 / 项目 / 应用）逐行保留标签；全量测量显式预留左侧空间，
+          // 空间不足时保留开头并在末尾加省略号，完整名称见 tooltip。
           data: categories,
           axisLine: { show: false },
           axisLabel: {
             color: t.textMuted,
-            fontSize: 12,
-            interval: props.by === "model" ? 0 : "auto",
-            hideOverlap: props.by !== "model",
-            width: categoryLabelWidth(),
-            formatter: formatCategoryLabel,
+            fontSize: AXIS_LABEL_FONT_SIZE,
+            fontFamily: resolvedLayout!.fontFamily,
+            margin: AXIS_LABEL_MARGIN,
+            interval: 0,
+            hideOverlap: false,
+            width: resolvedLayout!.axisLabelWidth,
+            formatter: resolvedLayout!.formatter,
             overflow: "truncate",
+            ellipsis: "…",
           },
         },
     // 默认总览全部数据；类别轴筛选后，数值轴自动按可见数据重新定标。
@@ -269,7 +300,13 @@ function buildOption(zoom: ZoomRange = { start: 0, end: 100 }): echarts.EChartsO
         type: "slider",
         ...(isDay.value
           ? { xAxisIndex: 0, bottom: 4, right: 80, height: 20 }
-          : { yAxisIndex: 0, top: 16, bottom: 44, right: 16, width: 16 }),
+          : {
+              yAxisIndex: 0,
+              top: GRID_TOP_HORIZONTAL,
+              bottom: GRID_BOTTOM_HORIZONTAL,
+              right: 16,
+              width: 16,
+            }),
         ...zoom,
         filterMode: "filter",
         borderColor: "transparent",
@@ -362,26 +399,46 @@ function flushChart(kind: PendingKind): void {
     initChart();
     return;
   }
-  const size = applyHeight(
+  const zoom =
     kind === "dimension"
       ? { start: 0, end: 100 }
       : kind === "data"
         ? zoomForNewData()
-        : captureZoom(),
-  );
+        : captureZoom();
+  const size = applyHeight(zoom);
   const resized = resizeIfNeeded(size);
+  const layout = isDay.value ? undefined : computeLayout(zoom, size.width);
   if (kind === "dimension") {
-    chart.setOption(buildOption(), { notMerge: true });
+    chart.setOption(buildOption(zoom, layout), { notMerge: true });
+    appliedGridLeft = layout?.gridLeft ?? 0;
+    appliedLabelBudget = layout?.maxLabelWidth ?? 0;
     zoomMode = ["percent", "percent"];
   } else if (kind === "data") {
     // 同维更新不要重新下发百分比范围，否则离散类别边界会再次取整而漂移。
-    const option = buildOption();
+    const option = buildOption(zoom, layout);
     delete option.dataZoom;
     chart.setOption(option, { notMerge: false });
-  } else if (resized && !isDay.value) {
-    // 外部容器尺寸变化：轴标签宽度并入同一布局批次，不发独立空转 setOption。
+    appliedGridLeft = layout?.gridLeft ?? 0;
+    appliedLabelBudget = layout?.maxLabelWidth ?? 0;
+  } else if (
+    layout &&
+    (resized || layout.gridLeft !== appliedGridLeft || layout.maxLabelWidth !== appliedLabelBudget)
+  ) {
+    // 外部容器宽度变化、缩放或平移改变可见标签最大宽度：左侧预留与省略函数同批更新。
+    appliedGridLeft = layout.gridLeft;
+    appliedLabelBudget = layout.maxLabelWidth;
     chart.setOption({
-      yAxis: { axisLabel: { width: categoryLabelWidth(), formatter: formatCategoryLabel } },
+      grid: { left: layout.gridLeft },
+      yAxis: {
+        axisLabel: {
+          fontFamily: layout.fontFamily,
+          margin: AXIS_LABEL_MARGIN,
+          width: layout.axisLabelWidth,
+          formatter: layout.formatter,
+          overflow: "truncate",
+          ellipsis: "…",
+        },
+      },
     });
   }
 }
@@ -410,7 +467,9 @@ function initChart(): void {
     recordPending({ kind: "layout" });
     return;
   }
-  const size = applyHeight({ start: 0, end: 100 });
+  const initialZoom: ZoomRange = { start: 0, end: 100 };
+  const size = applyHeight(initialZoom);
+  const layout = isDay.value ? undefined : computeLayout(initialZoom, size.width);
   chart = echarts.init(el.value, null, {
     renderer: "svg",
     width: size.width || undefined,
@@ -418,7 +477,9 @@ function initChart(): void {
   });
   appliedWidth = size.width;
   appliedHeight = size.height;
-  chart.setOption(buildOption(), { notMerge: true });
+  appliedGridLeft = layout?.gridLeft ?? 0;
+  appliedLabelBudget = layout?.maxLabelWidth ?? 0;
+  chart.setOption(buildOption(initialZoom, layout), { notMerge: true });
   bindZoomLayout();
 }
 
@@ -463,6 +524,7 @@ function rebuildForTheme(): void {
   chart?.dispose();
   chart = null;
   const size = applyHeight(zoom);
+  const layout = isDay.value ? undefined : computeLayout(zoom, size.width);
   chart = echarts.init(el.value, null, {
     renderer: "svg",
     width: size.width || undefined,
@@ -470,7 +532,9 @@ function rebuildForTheme(): void {
   });
   appliedWidth = size.width;
   appliedHeight = size.height;
-  chart.setOption(buildOption(zoom), { notMerge: true });
+  appliedGridLeft = layout?.gridLeft ?? 0;
+  appliedLabelBudget = layout?.maxLabelWidth ?? 0;
+  chart.setOption(buildOption(zoom, layout), { notMerge: true });
   bindZoomLayout(zoom);
 }
 
@@ -497,6 +561,7 @@ function maybeRestore(): void {
     chart.dispose();
     chart = null;
     const size = applyHeight(zoom);
+    const layout = isDay.value ? undefined : computeLayout(zoom, size.width);
     chart = echarts.init(el.value, null, {
       renderer: "svg",
       width: size.width || undefined,
@@ -504,7 +569,9 @@ function maybeRestore(): void {
     });
     appliedWidth = size.width;
     appliedHeight = size.height;
-    chart.setOption(buildOption(zoom), { notMerge: true });
+    appliedGridLeft = layout?.gridLeft ?? 0;
+    appliedLabelBudget = layout?.maxLabelWidth ?? 0;
+    chart.setOption(buildOption(zoom, layout), { notMerge: true });
     bindZoomLayout(zoom);
     return;
   }
@@ -550,8 +617,21 @@ function maybeRestore(): void {
     appliedWidth = size.width;
     appliedHeight = size.height;
     if (!isDay.value) {
+      const layout = computeLayout(captureZoom(), size.width);
+      appliedGridLeft = layout.gridLeft;
+      appliedLabelBudget = layout.maxLabelWidth;
       chart.setOption({
-        yAxis: { axisLabel: { width: categoryLabelWidth(), formatter: formatCategoryLabel } },
+        grid: { left: layout.gridLeft },
+        yAxis: {
+          axisLabel: {
+            fontFamily: layout.fontFamily,
+            margin: AXIS_LABEL_MARGIN,
+            width: layout.axisLabelWidth,
+            formatter: layout.formatter,
+            overflow: "truncate",
+            ellipsis: "…",
+          },
+        },
       });
     }
   }

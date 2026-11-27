@@ -174,10 +174,10 @@ const CCS_TZ_OPTIONS = computed(() => [
 ]);
 /** 预览/结果里的净新增 token 合计（四桶之和，展示用）。 */
 const netNewTokens = computed(() =>
-  ccsPreview.value ? totalTokens(ccsPreview.value.net_new_tokens) : 0,
+  ccsPreview.value ? totalTokens(ccsPreview.value.net_new_tokens) : 0n,
 );
 const reportNetTokens = computed(() =>
-  ccsReport.value ? totalTokens(ccsReport.value.net_new_tokens) : 0,
+  ccsReport.value ? totalTokens(ccsReport.value.net_new_tokens) : 0n,
 );
 // U03：时区的权威来源是 settings.toml——下拉的读写走串行保存队列
 // （保存中/失败状态与迁移提示都在「通用」分区的时区行展示）。
@@ -1889,6 +1889,7 @@ defineExpose({ priceColumns, pricingListKey, pricingListMaxHeight });
             ref="pricingScroll"
             :rows="pricing?.entries ?? []"
             :reset-key="pricingListKey"
+            :row-key="rowKey"
             :style="{ maxHeight: `${pricingListMaxHeight}px` }"
             :label="t('settings.priceList')"
             class="ts-auto-table-pricing"
@@ -2114,6 +2115,7 @@ defineExpose({ priceColumns, pricingListKey, pricingListMaxHeight });
   line-height: 1.5;
   color: var(--ts-text-muted);
   margin: var(--ts-space-1) 0 var(--ts-space-2);
+  overflow-wrap: anywhere;
 }
 
 /* U03：时区保存状态与一次性迁移提示 */

@@ -13,10 +13,11 @@ use jiff::tz::TimeZone;
 use serde::Serialize;
 
 use crate::aggregate::{GroupBy, preset_days_range};
+use crate::bigint::BigUint;
 use crate::cache::{Cache, mtime_ms};
 use crate::collection_status::CollectionStatusTracker;
 use crate::dedupe::dedupe_events;
-use crate::model::{AgentKind, TokenCounts, UsageEvent};
+use crate::model::{AgentKind, BigTokenCounts, TokenCounts, UsageEvent};
 use crate::pricing::Pricing;
 use crate::source::claude::ClaudeSource;
 use crate::source::claude_projects::ProjectMapping;
@@ -2170,16 +2171,16 @@ fn note_detail_bucket_event_scanned() {
     DETAIL_BUCKET_EVENTS_SCANNED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// 单个明细桶的可核对统计（只累加，不回读事件）。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// 单个明细桶的可核对统计（只累加，不回读事件；采用任意精度 BigTokenCounts，永不溢出 u64）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct DetailBucketStat {
     pub requests: u64,
-    pub tokens: crate::model::TokenCounts,
+    pub tokens: BigTokenCounts,
     /// **快照范围内**的明细：事件时间不晚于该桶覆盖起点（来源快照建立时刻）
     /// 的请求数与四桶合计。起点缺失时整桶明细都算快照内（信任 CCS 汇总口径，
     /// 见 §5.1）——这类明细视为可能已包含在日汇总中。
     pub snapshot_requests: u64,
-    pub snapshot_tokens: crate::model::TokenCounts,
+    pub snapshot_tokens: BigTokenCounts,
 }
 
 /// 每桶覆盖起点的累积。
@@ -2287,15 +2288,12 @@ pub(crate) fn collect_detail_buckets(
                     continue;
                 };
                 let stat = entry.entry(key.clone()).or_default();
-                // SF08：聚合口径全链路受检——桶统计同样不回绕、不饱和。
+                // SF08：请求数受检，token 桶累计走任意精度 BigTokenCounts，永不溢出。
                 stat.requests = stat
                     .requests
                     .checked_add(1)
                     .ok_or_else(|| anyhow::anyhow!("明细桶请求数累计超出可表示范围"))?;
-                stat.tokens = stat
-                    .tokens
-                    .checked_add(&e.tokens)
-                    .ok_or_else(|| anyhow::anyhow!("明细桶 token 累计超出可表示范围"))?;
+                stat.tokens.add_counts(&e.tokens);
                 // 快照内 = 事件时间不晚于覆盖起点；边界不可确认时整桶按快照内
                 // 处理（信任汇总、不重复计入，并另行披露可能的少算）。
                 let in_snapshot = match start.unknown {
@@ -2307,10 +2305,7 @@ pub(crate) fn collect_detail_buckets(
                         .snapshot_requests
                         .checked_add(1)
                         .ok_or_else(|| anyhow::anyhow!("明细桶快照内请求数累计超出可表示范围"))?;
-                    stat.snapshot_tokens = stat
-                        .snapshot_tokens
-                        .checked_add(&e.tokens)
-                        .ok_or_else(|| anyhow::anyhow!("明细桶快照内 token 累计超出可表示范围"))?;
+                    stat.snapshot_tokens.add_counts(&e.tokens);
                 }
             }
             Ok(())
@@ -2475,7 +2470,7 @@ pub(crate) fn select_rollup_contributions(
     struct Bucket<'a> {
         rows: Vec<&'a crate::history::StoredRollup>,
         requests: u64,
-        tokens: crate::model::TokenCounts,
+        tokens: BigTokenCounts,
         /// 覆盖起点 = 该桶全部汇总行中**最早**的来源快照建立时刻（`None` = 无
         /// 任何行带批次时刻，无法划分快照内外 → 整桶明细都算快照内）。
         since: Option<jiff::Timestamp>,
@@ -2518,7 +2513,7 @@ pub(crate) fn select_rollup_contributions(
         let bucket = buckets.entry(key).or_insert_with(|| Bucket {
             rows: Vec::new(),
             requests: 0,
-            tokens: crate::model::TokenCounts::default(),
+            tokens: BigTokenCounts::default(),
             since: None,
             since_latest: None,
             boundary_unknown: false,
@@ -2532,10 +2527,7 @@ pub(crate) fn select_rollup_contributions(
             .requests
             .checked_add(r.request_count)
             .ok_or_else(|| anyhow::anyhow!("日汇总请求数累计超出可表示范围"))?;
-        bucket.tokens = bucket
-            .tokens
-            .checked_add(&r.tokens)
-            .ok_or_else(|| anyhow::anyhow!("日汇总 token 累计超出可表示范围"))?;
+        bucket.tokens.add_counts(&r.tokens);
         // 同桶多行（不同 provider / 不同批次）：覆盖起点取**最早**的来源快照
         // 建立时刻——晚于它的明细可能不在先建立的快照里，按明细计入（不吞）；
         // 同时记录最晚时刻，用于披露"批次之间可能与较晚汇总重复"。
@@ -2569,7 +2561,7 @@ pub(crate) fn select_rollup_contributions(
                 bucket.app.as_str().to_string(),
                 bucket.model_identity.clone(),
             ))
-            .copied()
+            .cloned()
             .unwrap_or_default();
         if detail.requests == 0 {
             // 桶内没有请求明细：直接用汇总（H06 既有行为）。
@@ -2621,11 +2613,10 @@ pub(crate) fn select_rollup_contributions(
             if bucket.boundary_unknown {
                 legacy_boundary_buckets += 1;
             }
-            selection.coverage.covered_detail_tokens = selection
+            selection
                 .coverage
                 .covered_detail_tokens
-                .checked_add(&detail.snapshot_tokens)
-                .ok_or_else(|| anyhow::anyhow!("被汇总替代的明细 token 累计超出可表示范围"))?;
+                .add_big(&detail.snapshot_tokens);
             if !bucket.boundary_unknown
                 && let (Some(first), Some(latest)) = (bucket.since, bucket.since_latest)
                 && latest > first
@@ -2647,11 +2638,10 @@ pub(crate) fn select_rollup_contributions(
         // 冲突类型的独立统计诊断；不写进采集警告。
         selection.coverage.detail_buckets += 1;
         selection.coverage.unresolved_buckets += 1;
-        selection.coverage.unresolved_covered_tokens = selection
+        selection
             .coverage
             .unresolved_covered_tokens
-            .checked_add(&bucket.tokens)
-            .ok_or_else(|| anyhow::anyhow!("交叉冲突的汇总 token 累计超出可表示范围"))?;
+            .add_big(&bucket.tokens);
         let kind = if any_token_gt && any_token_lt {
             // 四桶方向交叉：例如明细 input 更大、output 更小。
             "crossed_token_buckets"
@@ -2956,6 +2946,7 @@ pub struct EventCostBreakdown {
     pub matched: crate::pricing::MatchedCandidate,
     /// 计价依据与依据值（prompt_tokens = input + cache_write + cache_read）。
     pub basis: Option<crate::pricing::PricingBasis>,
+    #[serde(serialize_with = "crate::bigint::serialize_u64_safe")]
     pub basis_value: u64,
     /// 命中分段的标签（None = 基础价档）。
     pub segment_label: Option<String>,
@@ -2987,9 +2978,14 @@ pub struct EventRow {
     pub ts: String,
     /// D1：游标第二分量（Claude = message.id；Codex 为空，靠 ts 唯一）。
     pub record_id: String,
-    /// Task 2：不透明游标（完整精度 UTC 时间戳 + record_id），翻页原样回传；
-    /// 前端不得从展示字符串反解。
+    /// Task 2：会话内不透明分页游标（绑定 query_id 与筛选指纹），翻页原样回传；
+    /// 每次刷新新建会话时会变化，仅用于会话内分页，不得用作跨刷新行锚点。
     pub cursor: String,
+    /// 跨查询刷新稳定的行身份标识：
+    /// - 原生请求：`event:<history_event_id>`（库内主键，独立于 query_id 与页内位置）；
+    /// - CCS 日汇总：`rollup:[day,model_key,source_tz,app]`（与日汇总分组键一一对应，
+    ///   独立于 query_id 与 ridx）。
+    pub row_id: String,
     pub agent: &'static str,
     pub model: String,
     pub session_id: String,
@@ -3000,16 +2996,16 @@ pub struct EventRow {
     /// B02：该请求作用域内最近观察到的结构化工作目录（保留子目录细节；
     /// 与 `project` 的区别是后者已按项目根归并）。
     pub event_cwd: Option<String>,
-    pub input: u64,
-    pub output: u64,
-    pub cache_write: u64,
-    pub cache_read: u64,
+    pub input: BigUint,
+    pub output: BigUint,
+    pub cache_write: BigUint,
+    pub cache_read: BigUint,
     /// N18：5 分钟缓存写分项（分项未知时为 None，不得当 0）。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_write_5m: Option<u64>,
+    pub cache_write_5m: Option<BigUint>,
     /// N18：1 小时缓存写分项（同上）。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_write_1h: Option<u64>,
+    pub cache_write_1h: Option<BigUint>,
     /// None = 模型无价格（unknown），不按 0。
     pub cost_usd: Option<f64>,
     /// Task 6：请求级费用计算明细（与 cost_usd 同一次 estimate 产出）；
@@ -3050,7 +3046,7 @@ pub struct RollupRowMeta {
     pub cost_detail: &'static str,
     pub unknown_pricing: bool,
     pub unknown_reason: Option<&'static str>,
-    pub unknown_tokens: TokenCounts,
+    pub unknown_tokens: BigTokenCounts,
     pub cost_partially_unknown: bool,
     pub has_estimated_cost: bool,
     pub cache_write_split_estimated: bool,
@@ -3071,7 +3067,7 @@ pub(crate) struct DrillRollupRow {
     model_key: String,
     source: String,
     requests: u64,
-    tokens: TokenCounts,
+    tokens: BigTokenCounts,
     models: Vec<String>,
     representative: String,
     source_cost_usd: Option<f64>,
@@ -3083,12 +3079,12 @@ pub(crate) struct DrillRollupRow {
     cost: std::sync::OnceLock<Result<DrillRollupCost, String>>,
 }
 
-/// 日行的估算费用构成：逐条走 [`crate::aggregate::rollup_cost_parts`] 后受检
-/// 累加，与聚合 `push_rollup_into`/`finish` 同口径（不另写一套计价）。
-#[derive(Debug, Clone, Copy, Default)]
+/// 日行的估算费用构成：逐条走 [`crate::aggregate::rollup_cost_parts`] 后按任意精度
+/// 累加未知 token，与聚合 `push_rollup_into`/`finish` 同口径（不另写一套计价）。
+#[derive(Debug, Clone, Default)]
 pub(crate) struct DrillRollupCost {
     cost_usd: f64,
-    unknown_tokens: TokenCounts,
+    unknown_tokens: BigTokenCounts,
     has_estimated_cost: bool,
     cache_write_split_estimated: bool,
     cache_price_zero_estimated: bool,
@@ -3100,7 +3096,7 @@ impl DrillRollupRow {
         &self,
         selection: &RollupSelection,
         pricing: &crate::pricing::Pricing,
-    ) -> Result<DrillRollupCost> {
+    ) -> Result<&DrillRollupCost> {
         let indices = &self.contributions;
         let cell = self.cost.get_or_init(|| {
             let mut acc = DrillRollupCost::default();
@@ -3111,17 +3107,14 @@ impl DrillRollupRow {
                 if !acc.cost_usd.is_finite() {
                     return Err("日汇总行费用累计出现非有限值".to_string());
                 }
-                acc.unknown_tokens = acc
-                    .unknown_tokens
-                    .checked_add(&parts.unknown_tokens)
-                    .ok_or_else(|| "日汇总行未知 token 累计超出可表示范围".to_string())?;
+                acc.unknown_tokens.add_counts(&parts.unknown_tokens);
                 acc.has_estimated_cost |= parts.has_estimated_cost;
                 acc.cache_write_split_estimated |= parts.cache_write_split_estimated;
                 acc.cache_price_zero_estimated |= parts.cache_price_zero_estimated;
             }
             Ok(acc)
         });
-        cell.as_ref().copied().map_err(|e| anyhow!("{e}"))
+        cell.as_ref().map_err(|e| anyhow!("{e}"))
     }
 }
 
@@ -3154,6 +3147,7 @@ impl RollupDrillIndex {
             n.add(string_bytes(&r.representative)?)?;
             n.add(strings_bytes(&r.models)?)?;
             n.add(vec_bytes(&r.contributions)?)?;
+            n.add(r.tokens.heap_bytes())?;
         }
         Ok(n.get())
     }
@@ -3188,7 +3182,7 @@ pub(crate) fn build_rollup_drill_index(
             model_key,
             source: r.source.clone(),
             requests: 0,
-            tokens: TokenCounts::default(),
+            tokens: BigTokenCounts::default(),
             models: Vec::new(),
             representative: r.model.clone(),
             source_cost_usd: None,
@@ -3201,10 +3195,7 @@ pub(crate) fn build_rollup_drill_index(
             .requests
             .checked_add(r.requests)
             .ok_or_else(|| anyhow!("日汇总行请求数累计超出可表示范围"))?;
-        row.tokens = row
-            .tokens
-            .checked_add(&r.tokens)
-            .ok_or_else(|| anyhow!("日汇总行 token 累计超出可表示范围"))?;
+        row.tokens.add_counts(&r.tokens);
         if !row.models.contains(&r.model) {
             row.models.push(r.model.clone());
         }
@@ -3249,9 +3240,15 @@ fn build_rollup_event_row(
     let pricing = snapshot.pricing();
     let r = snapshot.rollup_drill().row(ridx);
     let cost = r.cost(snapshot.rollup_selection(), pricing)?;
-    let unknown_total = cost.unknown_tokens.total();
+    let has_unknown = !cost.unknown_tokens.is_zero();
     let total_cost_usd = match (cost.has_estimated_cost, r.source_cost_usd) {
-        (_, Some(src)) => Some(cost.cost_usd + src),
+        (_, Some(src)) => {
+            let combined = cost.cost_usd + src;
+            if !combined.is_finite() {
+                anyhow::bail!("日汇总行合并费用出现非有限值");
+            }
+            Some(combined)
+        }
         (true, None) => Some(cost.cost_usd),
         (false, None) => None,
     };
@@ -3267,10 +3264,10 @@ fn build_rollup_event_row(
         source_cost_usd: r.source_cost_usd,
         source_cost_state: r.source_cost_state,
         cost_detail: "rollup_only",
-        unknown_pricing: unknown_total > 0,
-        unknown_reason: (unknown_total > 0).then_some("rollup_only"),
-        unknown_tokens: cost.unknown_tokens,
-        cost_partially_unknown: unknown_total > 0,
+        unknown_pricing: has_unknown,
+        unknown_reason: has_unknown.then_some("rollup_only"),
+        unknown_tokens: cost.unknown_tokens.clone(),
+        cost_partially_unknown: has_unknown,
         has_estimated_cost: cost.has_estimated_cost,
         cache_write_split_estimated: cost.cache_write_split_estimated,
         cache_price_zero_estimated: cost.cache_price_zero_estimated,
@@ -3287,28 +3284,34 @@ fn build_rollup_event_row(
         ridx: Some(ridx),
     })
     .unwrap_or_default();
+    let row_id = format!(
+        "rollup:{}",
+        serde_json::to_string(&(&r.day, &r.model_key, &r.source_tz, r.app.as_str()))
+            .unwrap_or_default()
+    );
     Ok(EventRow {
         ts: r.day.clone(),
         record_id: String::new(),
         cursor,
+        row_id,
         agent: r.app.as_str(),
         model: r.model_key.clone(),
         session_id: String::new(),
         project: String::new(),
         session_initial_cwd: None,
         event_cwd: None,
-        input: r.tokens.input,
-        output: r.tokens.output,
-        cache_write: r.tokens.cache_write,
-        cache_read: r.tokens.cache_read,
+        input: r.tokens.input.clone(),
+        output: r.tokens.output.clone(),
+        cache_write: r.tokens.cache_write.clone(),
+        cache_read: r.tokens.cache_read.clone(),
         cache_write_5m: r
             .tokens
             .cache_write_split_known
-            .then_some(r.tokens.cache_write_5m),
+            .then(|| r.tokens.cache_write_5m.clone()),
         cache_write_1h: r
             .tokens
             .cache_write_split_known
-            .then_some(r.tokens.cache_write_1h),
+            .then(|| r.tokens.cache_write_1h.clone()),
         cost_usd: total_cost_usd,
         cost_breakdown: None,
         rollup: Some(meta),
@@ -3502,6 +3505,7 @@ fn build_event_row(
             }
             b.since.is_none_or(|at| e.ts <= at).then(|| b.day.clone())
         });
+    let row_id = format!("event:{}", row.event_id);
     Ok(EventRow {
         ts: e
             .ts
@@ -3510,18 +3514,23 @@ fn build_event_row(
             .to_string(),
         record_id: e.record_id.clone(),
         cursor,
+        row_id,
         agent: e.agent.as_str(),
         model: e.model.clone(),
         session_id: e.session_id.clone(),
         project: e.project.clone(),
         session_initial_cwd: e.session_initial_cwd.clone(),
         event_cwd: e.event_cwd.clone(),
-        input: e.input_tokens,
-        output: e.output_tokens,
-        cache_write: e.cache_write_tokens,
-        cache_read: e.cache_read_tokens,
-        cache_write_5m: e.cache_write_split_known.then_some(e.cache_write_5m),
-        cache_write_1h: e.cache_write_split_known.then_some(e.cache_write_1h),
+        input: BigUint::from(e.input_tokens),
+        output: BigUint::from(e.output_tokens),
+        cache_write: BigUint::from(e.cache_write_tokens),
+        cache_read: BigUint::from(e.cache_read_tokens),
+        cache_write_5m: e
+            .cache_write_split_known
+            .then(|| BigUint::from(e.cache_write_5m)),
+        cache_write_1h: e
+            .cache_write_split_known
+            .then(|| BigUint::from(e.cache_write_1h)),
         cost_usd,
         cost_breakdown,
         rollup: None,
@@ -4610,8 +4619,8 @@ cache_write_1h = 6.0
         let old = &list.rows[1];
         // 分项行：两档明细行替换合并行；行级分项字段随可信分档给出。
         assert_eq!(both.cache_write, 2_000_000);
-        assert_eq!(both.cache_write_5m, Some(1_000_000));
-        assert_eq!(both.cache_write_1h, Some(1_000_000));
+        assert_eq!(both.cache_write_5m, Some(BigUint::from(1_000_000u64)));
+        assert_eq!(both.cache_write_1h, Some(BigUint::from(1_000_000u64)));
         let bd = both.cost_breakdown.as_ref().unwrap();
         use crate::pricing::CostLineKind;
         let w5 = bd
@@ -5042,7 +5051,7 @@ cache_read = 0.0
                 break;
             }
             let r = &page.rows[0];
-            seen.push((r.cursor.clone(), r.input));
+            seen.push((r.cursor.clone(), r.input.to_u64().unwrap()));
             cursor = Some(r.cursor.clone());
         }
         assert_eq!(seen.len(), 3, "翻页必须覆盖全量且不丢同秒事件: {seen:?}");
@@ -5149,7 +5158,7 @@ cache_read = 0.0
                 break;
             }
             let r = &page.rows[0];
-            seen.push(r.input);
+            seen.push(r.input.to_u64().unwrap());
             cursors.push(r.cursor.clone());
             cursor = Some(r.cursor.clone());
         }

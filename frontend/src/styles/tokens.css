@@ -545,6 +545,8 @@ body {
 }
 .ts-notice-content {
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--ts-text-secondary);
 }
 .ts-notice-action {

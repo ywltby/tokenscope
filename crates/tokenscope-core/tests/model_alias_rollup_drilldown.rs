@@ -825,11 +825,11 @@ fn mixed_native_covered_and_rollup_reconciles() {
     for r in &list.rows {
         let v = row_json(r);
         if v.get("rollup").is_some() {
-            rollup_input += r.input;
+            rollup_input += r.input.to_u64().unwrap();
             rollup_requests += v["rollup"]["requests"].as_u64().unwrap();
             rollup_cost += v["rollup"]["total_cost_usd"].as_f64().unwrap();
         } else if v.get("covered_by_rollup").is_none() {
-            uncovered_input += r.input;
+            uncovered_input += r.input.to_u64().unwrap();
             uncovered_requests += 1;
             uncovered_cost += r.cost_usd.unwrap_or(0.0);
         } else {
@@ -1250,11 +1250,11 @@ fn rollup_row_cost_matches_aggregation_four_states() {
         );
         assert_eq!(
             meta["unknown_tokens"]["input"].as_u64(),
-            Some(g.unknown_tokens.input)
+            g.unknown_tokens.input.to_u64()
         );
         assert_eq!(
             meta["unknown_tokens"]["output"].as_u64(),
-            Some(g.unknown_tokens.output)
+            g.unknown_tokens.output.to_u64()
         );
     }
 
@@ -1274,5 +1274,179 @@ fn rollup_row_cost_matches_aggregation_four_states() {
     let none = group_of(&report, "mnone");
     assert_eq!(none.total_cost_usd, None, "完全无费用依据 = 未知");
     assert_eq!(none.unknown_tokens.input, 700);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 跨查询刷新稳定的行身份（`row_id`）必须与会话绑定的分页游标（`cursor`）分离：
+/// - 原生请求：同秒多条请求 `row_id` 互异；新建查询会话且顶部新增请求后，`cursor` 随
+///   `qid` 变化，原请求的 `row_id` 保持不变；
+/// - CCS 日汇总：新建查询会话且上方新增更晚日期汇总使 `ridx` 顺延后，`cursor` 随
+///   `qid`/`ridx` 变化，原日汇总的 `row_id` 保持不变，且与原生请求前缀互斥。
+#[test]
+fn event_row_id_stays_stable_across_sessions_and_prepends_while_cursor_rotates() {
+    let dir = temp_dir("stable-row-id-vs-cursor");
+    write_md(&dir, opus_md());
+    let claude = dir.join("claude");
+    // 两条同秒原生请求 + 一条较早请求
+    write_claude_log(
+        &claude,
+        "proj/s1.jsonl",
+        &[
+            claude_line(
+                "s1",
+                "m-same-1",
+                "2026-05-29T10:00:00.100Z",
+                "claude-opus-4-7",
+                100,
+                50,
+            ),
+            claude_line(
+                "s1",
+                "m-same-2",
+                "2026-05-29T10:00:00.100Z",
+                "claude-opus-4-7",
+                120,
+                60,
+            ),
+            claude_line(
+                "s1",
+                "m-early",
+                "2026-05-29T09:00:00.000Z",
+                "claude-opus-4-7",
+                80,
+                40,
+            ),
+        ],
+    );
+    let history = history_of(&dir);
+    write_rollup(
+        &history,
+        "p1",
+        "2026-05-27",
+        "claude-opus-4-7",
+        15,
+        counts(1000, 500, 0, 0),
+        "2026-05-27T12:00:00Z",
+        Some(1.0),
+    );
+    write_rollup(
+        &history,
+        "p1",
+        "2026-05-26",
+        "claude-opus-4-7",
+        8,
+        counts(800, 400, 0, 0),
+        "2026-05-26T12:00:00Z",
+        Some(0.5),
+    );
+
+    let o = opts(&dir, Some(claude.clone()), GroupBy::Model, "Asia/Shanghai");
+    let filter = EventFilter {
+        limit: Some(50),
+        ..Default::default()
+    };
+    let h1 = tokenscope::query::begin_query_handle(&o).unwrap();
+    let list1 = tokenscope::query::query_events(&h1.query_id, &filter).unwrap();
+    assert_eq!(list1.rows.len(), 5, "3 条原生请求 + 2 条 CCS 日汇总");
+
+    let by_rid1 = |rid: &str| list1.rows.iter().find(|r| r.record_id == rid).unwrap();
+    let by_day1 = |day: &str| {
+        list1
+            .rows
+            .iter()
+            .find(|r| r.rollup.as_ref().is_some_and(|m| m.day == day))
+            .unwrap()
+    };
+    let same1_a = by_rid1("m-same-1");
+    let same2_a = by_rid1("m-same-2");
+    let early_a = by_rid1("m-early");
+    let day27_a = by_day1("2026-05-27");
+    let day26_a = by_day1("2026-05-26");
+
+    assert!(same1_a.row_id.starts_with("event:"), "{}", same1_a.row_id);
+    assert!(same2_a.row_id.starts_with("event:"), "{}", same2_a.row_id);
+    assert_ne!(same1_a.row_id, same2_a.row_id, "同秒不同请求 row_id 互异");
+    assert!(day27_a.row_id.starts_with("rollup:"), "{}", day27_a.row_id);
+    assert!(day26_a.row_id.starts_with("rollup:"), "{}", day26_a.row_id);
+    assert_ne!(day27_a.row_id, day26_a.row_id);
+
+    // 模拟后台刷新前顶部新增更晚的原生请求与更晚日期的 CCS 日汇总（使旧行下标与 ridx 均顺延）
+    write_claude_log(
+        &claude,
+        "proj/s2.jsonl",
+        &[
+            claude_line(
+                "s2",
+                "m-fresh-1",
+                "2026-05-29T12:00:00.000Z",
+                "claude-opus-4-7",
+                200,
+                90,
+            ),
+            claude_line(
+                "s2",
+                "m-fresh-2",
+                "2026-05-29T11:00:00.000Z",
+                "claude-opus-4-7",
+                180,
+                70,
+            ),
+        ],
+    );
+    write_rollup(
+        &history,
+        "p2",
+        "2026-05-28",
+        "claude-opus-4-7",
+        30,
+        counts(2000, 900, 0, 0),
+        "2026-05-28T12:00:00Z",
+        Some(2.0),
+    );
+
+    let h2 = tokenscope::query::begin_query_handle(&o).unwrap();
+    assert_ne!(h1.query_id, h2.query_id);
+    let list2 = tokenscope::query::query_events(&h2.query_id, &filter).unwrap();
+    assert_eq!(list2.rows.len(), 8, "5 条原生请求 + 3 条 CCS 日汇总");
+
+    let by_rid2 = |rid: &str| list2.rows.iter().find(|r| r.record_id == rid).unwrap();
+    let by_day2 = |day: &str| {
+        list2
+            .rows
+            .iter()
+            .find(|r| r.rollup.as_ref().is_some_and(|m| m.day == day))
+            .unwrap()
+    };
+    for (before, after, label) in [
+        (same1_a, by_rid2("m-same-1"), "m-same-1"),
+        (same2_a, by_rid2("m-same-2"), "m-same-2"),
+        (early_a, by_rid2("m-early"), "m-early"),
+        (day27_a, by_day2("2026-05-27"), "rollup 2026-05-27"),
+        (day26_a, by_day2("2026-05-26"), "rollup 2026-05-26"),
+    ] {
+        assert_ne!(
+            before.cursor, after.cursor,
+            "{label}: 分页游标必须随新会话切换"
+        );
+        assert_eq!(
+            before.row_id, after.row_id,
+            "{label}: 跨刷新行身份 row_id 必须稳定不变"
+        );
+    }
+
+    // 确认旧会话分页游标在新会话仍会被严格拒绝（分页安全边界未放宽）
+    let stale_page = tokenscope::query::query_events(
+        &h2.query_id,
+        &EventFilter {
+            before: Some(same1_a.cursor.clone()),
+            limit: Some(50),
+            ..Default::default()
+        },
+    );
+    assert!(
+        stale_page.is_err(),
+        "旧会话游标在新会话必须仍返回 query_expired"
+    );
+
     std::fs::remove_dir_all(&dir).ok();
 }

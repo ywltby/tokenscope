@@ -128,7 +128,7 @@ fn ccs_history_delivery_real_copy_reconciliation() {
         "全部时间 Claude 总请求数：产品 vs 独立核算（含无明细汇总桶）"
     );
     assert_tokens_eq(
-        pristine.totals.tokens,
+        &pristine.totals.tokens,
         &pristine_indep.expected_tokens,
         "pristine 总量",
     );
@@ -197,7 +197,7 @@ fn ccs_history_delivery_real_copy_reconciliation() {
         "导入后总请求数：产品 vs 独立核算"
     );
     assert_tokens_eq(
-        post.totals.tokens,
+        &post.totals.tokens,
         &post_indep.expected_tokens,
         "post 导入后总量",
     );
@@ -439,7 +439,11 @@ struct ProductView {
     coverage_serde: serde_json::Value,
 }
 
-fn assert_tokens_eq(actual: TokenCounts, expected: &TokenCounts, label: &str) {
+fn assert_tokens_eq(
+    actual: &tokenscope::model::BigTokenCounts,
+    expected: &TokenCounts,
+    label: &str,
+) {
     assert_eq!(actual.input, expected.input, "{label}: input");
     assert_eq!(actual.output, expected.output, "{label}: output");
     assert_eq!(

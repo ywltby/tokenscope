@@ -8,7 +8,7 @@
 export interface TooltipEntry {
   /** 系列名（如"输入/输出/缓存写/缓存命中"）——不可信文本 */
   seriesName: string;
-  value: number | null | undefined;
+  value: number | bigint | string | null | undefined;
 }
 
 export interface TooltipInput {
@@ -17,8 +17,8 @@ export interface TooltipInput {
   /** title 缺失时的回退名（原始参数 name）——同样不可信 */
   fallbackTitle?: string | null;
   entries: TooltipEntry[];
-  /** 数值 → 显示文本（后端金额口径的展示格式化） */
-  formatValue: (v: number) => string;
+  /** 数值 → 显示文本（支持任意精度 BigInt 展示格式化） */
+  formatValue: (v: number | bigint | string) => string;
 }
 
 /** 附加一行文本节点（无格式化拼接）。 */
@@ -38,7 +38,7 @@ export function buildTooltipNode(input: TooltipInput): HTMLElement {
   const title = input.title ?? input.fallbackTitle ?? "";
   appendLine(root, title, false);
   input.entries.forEach((e) => {
-    const valueText = e.value == null ? "" : ` ${input.formatValue(Number(e.value))}`;
+    const valueText = e.value == null ? "" : ` ${input.formatValue(e.value)}`;
     appendLine(root, `${e.seriesName}${valueText}`, true);
   });
   return root;

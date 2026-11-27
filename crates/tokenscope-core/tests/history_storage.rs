@@ -271,7 +271,7 @@ fn u64_boundary_values_roundtrip_and_overflow_errors() {
     let stored = h.stored_events().unwrap();
     assert_eq!(stored[0].tokens.input, u64::MAX, "u64 边界不经 i64 截断");
 
-    // 两条各自合法的用量合计溢出：明确报错，不回绕、不饱和、不静默吞掉。
+    // 两条各自合法的用量合计超过 u64::MAX：历史库聚合总计按任意精度准确累加，不回绕、不溢出。
     let half = u64::MAX / 2 + 1;
     let (_dir2, h2) = db("u64-overflow");
     for (i, key) in ["k1", "k2"].iter().enumerate() {
@@ -280,8 +280,12 @@ fn u64_boundary_values_roundtrip_and_overflow_errors() {
         e.observed_at = ts(&format!("2026-07-17T08:00:0{i}Z"));
         h2.write_batch(&[e]).unwrap();
     }
-    let err = h2.totals().unwrap_err().to_string();
-    assert!(err.contains("溢出"), "明确报错：{err}");
+    let summed = h2.totals().unwrap();
+    assert_eq!(
+        summed.input.to_string(),
+        (u128::from(half) * 2).to_string(),
+        "历史库聚合总计必须按任意精度准确累加"
+    );
 }
 
 #[test]

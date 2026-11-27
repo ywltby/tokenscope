@@ -707,10 +707,10 @@ fn unknown_project_drill_returns_ccs_day_rows() {
         .map(|r| row_json(r)["rollup"]["requests"].as_u64().unwrap())
         .sum();
     assert_eq!(requests, g.requests);
-    let total: u64 = list
+    let total: tokenscope::bigint::BigUint = list
         .rows
         .iter()
-        .map(|r| r.input + r.output + r.cache_write + r.cache_read)
+        .map(|r| &r.input + &r.output + &r.cache_write + &r.cache_read)
         .sum();
     assert_eq!(total, g.tokens.total());
     let cost: f64 = list.rows.iter().filter_map(|r| r.cost_usd).sum();
@@ -799,10 +799,10 @@ fn unknown_project_drill_mixes_requests_and_rollups() {
         )
         .sum();
     assert_eq!(requests, unknown.requests, "Σ明细 + Σ日行 == 分组 requests");
-    let tokens: u64 = list
+    let tokens: tokenscope::bigint::BigUint = list
         .rows
         .iter()
-        .map(|r| r.input + r.output + r.cache_write + r.cache_read)
+        .map(|r| &r.input + &r.output + &r.cache_write + &r.cache_read)
         .sum();
     assert_eq!(tokens, unknown.tokens.total());
     let cost: f64 = list.rows.iter().filter_map(|r| r.cost_usd).sum();

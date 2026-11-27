@@ -10,6 +10,7 @@ import {
   type RollupRowMeta,
 } from "../types";
 import { formatMoney } from "../lib/formatMoney";
+import { stableEventRowKey } from "../lib/eventRowKey";
 import { tokenBucketLabel } from "../lib/tokenDisplay";
 import { totalInput } from "../lib/tokenUsage";
 import CostBreakdownTooltip from "./CostBreakdownTooltip.vue";
@@ -22,6 +23,8 @@ const t = useT();
 const props = defineProps<{
   list: EventList;
   filterLabel: string;
+  /** 筛选重置身份：来源/时间/日粒度/时区/下钻变化时才回顶部，同筛选刷新保持滚动与行锚点。 */
+  resetKey?: string | null;
   /** D1 游标分页：还有未加载的行 */
   more?: boolean;
   moreLoading?: boolean;
@@ -172,7 +175,7 @@ const columns = computed<DataTableColumn[]>(() => [
           models: m.models.join(", "),
           tz: m.source_tz,
         });
-        const key = row.cursor;
+        const key = rowKey(row);
         return h(
           NTooltip,
           {
@@ -280,7 +283,7 @@ const columns = computed<DataTableColumn[]>(() => [
       const row = asRow(r);
       const c = row.cost_usd;
       const bd = row.cost_breakdown;
-      const key = row.cursor;
+      const key = rowKey(row);
       const m = row.rollup;
       // v0.9.4：日汇总行走分组费用浮层（构成/缺失与聚合行同一依据）；
       // 无费用依据时显示「未知」，仍可打开浮层查看缺项。
@@ -329,10 +332,10 @@ defineExpose({ columns });
 type EventRowT = EventList["rows"][number];
 const asRow = (r: object): EventRowT => r as unknown as EventRowT;
 
-// R10：行身份 = 后端唯一游标（完整精度 UTC 时间 + record_id），不再用
-// 展示时间拼串——同秒同会话的两条请求有不同 cursor，行身份必须互异
-//（同秒请求共用费用浮层状态即因旧拼法冲突）。
-const rowKey = (r: object): string => asRow(r).cursor;
+// R10 + 跨刷新稳定锚点：行身份使用稳定 row_id（原生请求 = event:<id>，
+// CCS 日汇总 = rollup 四元组），与会话绑定的分页游标 row.cursor 解耦；
+// 同秒同会话的两条请求仍互异，后台刷新新建 query_id 时行身份与滚动锚点不漂移。
+const rowKey = (r: object): string => stableEventRowKey(asRow(r));
 </script>
 
 <template>
@@ -357,6 +360,8 @@ const rowKey = (r: object): string => asRow(r).cursor;
       :more="more"
       :loading="moreLoading"
       :blocked="moreBlockedHint"
+      :reset-key="props.resetKey"
+      :row-key="rowKey"
       :label="t('dashboard.eventsListAria')"
       class="ts-auto-table-events"
       @load-more="emit('load-more')"

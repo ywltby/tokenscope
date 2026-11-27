@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use tokenscope::aggregate::GroupBy;
-use tokenscope::model::{AgentKind, TokenCounts};
+use tokenscope::model::AgentKind;
 use tokenscope::query;
 use tokenscope::report::{EventFilter, SummaryOptions, summary};
 
@@ -211,7 +211,15 @@ fn merged_project_drilldown_returns_both_agents() {
     }
 }
 
-fn totals(o: &SummaryOptions) -> (u64, TokenCounts, f64, bool, TokenCounts) {
+fn totals(
+    o: &SummaryOptions,
+) -> (
+    u64,
+    tokenscope::model::BigTokenCounts,
+    f64,
+    bool,
+    tokenscope::model::BigTokenCounts,
+) {
     let t = summary(o).unwrap().totals;
     (
         t.requests,
@@ -267,29 +275,25 @@ fn project_merge_preserves_totals() {
     assert_eq!(split.4, merged.4);
 }
 
-fn accumulate(a: TokenCounts, b: TokenCounts) -> TokenCounts {
-    TokenCounts {
-        input: a.input + b.input,
-        output: a.output + b.output,
-        cache_write: a.cache_write + b.cache_write,
-        cache_read: a.cache_read + b.cache_read,
-        cache_write_5m: 0,
-        cache_write_1h: 0,
-        cache_write_split_known: false,
-    }
+fn accumulate(
+    mut a: tokenscope::model::BigTokenCounts,
+    b: tokenscope::model::BigTokenCounts,
+) -> tokenscope::model::BigTokenCounts {
+    a.add_big(&b);
+    a
 }
 
 /// 分组快照（逐字段比较冷/热/强制刷新三条路径）。
 fn groups_snapshot(
     r: &tokenscope::report::SummaryReport,
-) -> Vec<(String, u64, TokenCounts, f64, bool)> {
+) -> Vec<(String, u64, tokenscope::model::BigTokenCounts, f64, bool)> {
     r.groups
         .iter()
         .map(|g| {
             (
                 g.key.clone(),
                 g.requests,
-                g.tokens,
+                g.tokens.clone(),
                 g.cost_usd,
                 g.unknown_pricing,
             )

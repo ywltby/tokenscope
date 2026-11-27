@@ -1,6 +1,10 @@
 // 设计系统 Task 6：费用明细行模型——事实→公式→结果→来源、未知与缺价语义。
 import { describe, expect, it } from "vitest";
-import { formatCostBreakdownRows, formatCostBreakdownText } from "./costBreakdown";
+import {
+  formatCostBreakdownRows,
+  formatCostBreakdownText,
+  isRequestFullyUnpriced,
+} from "./costBreakdown";
 import { fmtPriceOrUnknown, formatTieredPricing } from "./tieredPrice";
 import type { EventCostBreakdown, PricingEntry } from "../types";
 
@@ -692,5 +696,42 @@ describe("N18 selection wording attributes only the selected candidate", () => {
   it("纯估算的胜出结果仍不声称自身含未计价 token", () => {
     const text = formatCostBreakdownText(base);
     expect(text).not.toContain("未计价");
+  });
+});
+
+describe("超过 JS MAX_SAFE_INTEGER 的单请求费用浮层精确整数保真", () => {
+  it("计价基数、已计价/未计价分项与 5m+1h 拆分写入均按精确十进制字符串无损渲染", () => {
+    const big = bd({
+      basis_value: "9007199254740999",
+      lines: [
+        {
+          kind: "input",
+          tokens: "9007199254740993",
+          unit_price: 3,
+          subtotal: 27021597.76,
+          priced: true,
+        },
+        {
+          kind: "output",
+          tokens: "9007199254740995",
+          unit_price: null,
+          subtotal: 0,
+          priced: false,
+        },
+        { kind: "cache_write_5m", tokens: "3", unit_price: 3.75, subtotal: 0.000011, priced: true },
+        { kind: "cache_write_1h", tokens: "3", unit_price: 6, subtotal: 0.000018, priced: true },
+        { kind: "cache_read", tokens: 0, unit_price: 0.3, subtotal: 0, priced: true },
+      ],
+      cost_usd: 27021597.76,
+      complete: false,
+      unknown: { input: 0, output: "9007199254740995", cache_write: 0, cache_read: 0 },
+    });
+    const text = formatCostBreakdownText(big);
+    expect(text).toContain("9,007,199,254,740,993");
+    expect(text).toContain("9,007,199,254,740,995");
+    expect(text).toContain("9,007,199,254,740,999");
+    expect(text).not.toContain("9,007,199,254,740,992");
+    expect(text).not.toContain("9,007,199,254,740,996");
+    expect(isRequestFullyUnpriced(big.lines)).toBe(false);
   });
 });

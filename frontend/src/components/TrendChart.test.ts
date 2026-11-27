@@ -1,4 +1,4 @@
-// 设计系统 Task 4 + UX05：TrendChart 主题接入、逐行模型图/其他维度高度上限，
+// 设计系统 Task 4 + UX05：TrendChart 主题接入、非时间维度逐行自适应高度，
 // 以及实例生命周期与数据更新分离（不因无关父级更新重建；同维度 merge 保留
 // zoom；维度切换完整替换；主题切换一次 dispose/init；0 类别不建实例）。
 // echarts 全 mock（happy-dom 无 canvas），ResizeObserver 打桩。
@@ -30,7 +30,15 @@ const echartsMock = vi.hoisted(() => {
 
 const resizeObservers = vi.hoisted(() => [] as ResizeObserverCallback[]);
 
-vi.mock("echarts", () => ({ init: echartsMock.init }));
+vi.mock("echarts", () => ({
+  init: echartsMock.init,
+  format: {
+    truncateText: (text: string, width: number, _font?: string, ellipsis = "…") => {
+      const maxChars = Math.max(1, Math.floor(width / 7));
+      return text.length > maxChars ? text.slice(0, maxChars - 1) + ellipsis : text;
+    },
+  },
+}));
 
 class TestResizeObserver {
   constructor(callback: ResizeObserverCallback) {
@@ -45,6 +53,7 @@ import TrendChart from "./TrendChart.vue";
 import { chartTokens } from "../styles/chartTheme";
 import { useTheme } from "../composables/theme";
 import { useTokenColors } from "../composables/tokenColors";
+import { DEFAULT_LOCALE, setLocale } from "../lib/i18n";
 import type { Group } from "../types";
 
 function group(key: string, input: number): Group {
@@ -204,29 +213,39 @@ describe("TrendChart（设计系统 Task 4）", () => {
     w.unmount();
   });
 
-  it.each(["project", "agent"])("%s 保留全部类别且画布高度封顶，提供显式缩放", async (by) => {
-    const many = Array.from({ length: 50 }, (_, i) => group(`model-${i}`, 50 - i));
-    const w = mount(TrendChart, { props: { groups: many, by } });
-    await flushPromises();
-    const opt = setOption.mock.calls[0][0] as {
-      dataZoom?: unknown[];
-      yAxis: { data: string[] };
-    };
-    expect(opt.dataZoom).toHaveLength(2);
-    expect(opt.yAxis.data).toHaveLength(50);
-    const h2 = Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.height, 10);
-    expect(h2).toBeLessThanOrEqual(480);
-    // v0.9.1 缺陷 A：init 显式传容器尺寸（隐藏期恢复必须按真实尺寸初始化，
-    // 不传会被 ECharts 量成 100px）。happy-dom 无布局 → clientWidth 为 0
-    // → width 为 undefined（与修复前一致）；真实容器下由浏览器契约断言
-    // 实际宽度（summary_chart_survives_hidden_rebuild）。
-    const initOpts = init.mock.calls[0][2] as { renderer: string; width?: number };
-    expect(initOpts.renderer).toBe("svg");
-    if (initOpts.width !== undefined) {
-      expect(initOpts.width).toBeGreaterThan(0);
-    }
-    w.unmount();
-  });
+  it.each(["model", "project", "agent"])(
+    "%s 保留全部类别、按可见行数自适应高度（无 480px 上限）并提供显式缩放",
+    async (by) => {
+      const many = Array.from({ length: 50 }, (_, i) => group(`item-${i}`, 50 - i));
+      const w = mount(TrendChart, { props: { groups: many, by } });
+      try {
+        await flushPromises();
+        const opt = setOption.mock.calls[0][0] as {
+          dataZoom?: unknown[];
+          yAxis: { data: string[]; axisLabel: { interval: unknown; hideOverlap: boolean } };
+        };
+        expect(opt.dataZoom).toHaveLength(2);
+        expect(opt.yAxis.data).toHaveLength(50);
+        expect(opt.yAxis.axisLabel).toMatchObject({ interval: 0, hideOverlap: false });
+        const h2 = Number.parseInt(
+          (w.find(".chart-canvas").element as HTMLElement).style.height,
+          10,
+        );
+        expect(h2).toBe(50 * 24 + 80);
+        // v0.9.1 缺陷 A：init 显式传容器尺寸（隐藏期恢复必须按真实尺寸初始化，
+        // 不传会被 ECharts 量成 100px）。happy-dom 无布局 → clientWidth 为 0
+        // → width 为 undefined（与修复前一致）；真实容器下由浏览器契约断言
+        // 实际宽度（summary_chart_survives_hidden_rebuild）。
+        const initOpts = init.mock.calls[0][2] as { renderer: string; width?: number };
+        expect(initOpts.renderer).toBe("svg");
+        if (initOpts.width !== undefined) {
+          expect(initOpts.width).toBeGreaterThan(0);
+        }
+      } finally {
+        w.unmount();
+      }
+    },
+  );
 
   it("保留图表画布，不提供数据摘要面板", async () => {
     const w = mount(TrendChart, {
@@ -301,9 +320,17 @@ describe("TrendChart 卡片化（设计系统 Task 5）", () => {
   });
 });
 
-describe("模型图逐行标签与可见行高", () => {
-  const models = (count: number) =>
-    Array.from({ length: count }, (_, i) => group(`model-${i}`, count - i));
+describe("非时间维度（模型 / 项目 / 应用）逐行标签与可见行高", () => {
+  const NON_TIME_DIMS = ["model", "project", "agent"] as const;
+  const items = (by: string, count: number) =>
+    Array.from({ length: count }, (_, i) =>
+      by === "project"
+        ? {
+            ...group(`/workspace/org/team/repo-group/project-${i}-very-long-name`, count - i),
+            label: `project-${i}-very-long-directory-name-for-axis-truncation`,
+          }
+        : group(`${by}-${i}`, count - i),
+    );
   const height = (w: ReturnType<typeof mount>) =>
     Number.parseInt((w.find(".chart-canvas").element as HTMLElement).style.height, 10);
   function zoom(
@@ -319,102 +346,128 @@ describe("模型图逐行标签与可见行高", () => {
       : { start: range.start, end: range.end },
   ): void {
     echartsMock.getOption.mockReturnValue({ dataZoom: [range] });
-    const listener = echartsMock.on.mock.calls.find(([name]) => name === "datazoom")?.[1];
+    const listener = [...echartsMock.on.mock.calls]
+      .reverse()
+      .find(([name]) => name === "datazoom")?.[1];
     expect(listener, "每次 init 都须接入 datazoom 布局更新").toBeTypeOf("function");
     listener(event);
   }
 
-  it("普通 wheel 不交给 ECharts 消费且不阻止默认滚动，Ctrl wheel 正常传入", () => {
-    const w = mount(TrendChart, { props: { groups: models(5), by: "model" } });
-    try {
-      const canvas = w.find(".chart-canvas").element;
-      const child = document.createElement("div");
-      canvas.appendChild(child);
-      const chartWheel = vi.fn();
-      child.addEventListener("wheel", chartWheel);
-      // happy-dom 的 WheelEvent 不实现 ctrlKey；用相同原生鼠标修饰键测捕获分流。
-      const ordinary = new MouseEvent("wheel", { bubbles: true, cancelable: true });
-      child.dispatchEvent(ordinary);
-      expect(chartWheel).not.toHaveBeenCalled();
-      expect(ordinary.defaultPrevented).toBe(false);
-      child.dispatchEvent(new MouseEvent("wheel", { bubbles: true, ctrlKey: true }));
-      expect(chartWheel).toHaveBeenCalledTimes(1);
-    } finally {
-      w.unmount();
-    }
-  });
+  it.each(NON_TIME_DIMS)(
+    "%s 普通 wheel 不交给 ECharts 消费且不阻止默认滚动，Ctrl wheel 正常传入",
+    (by) => {
+      const w = mount(TrendChart, { props: { groups: items(by, 5), by } });
+      try {
+        const canvas = w.find(".chart-canvas").element;
+        const child = document.createElement("div");
+        canvas.appendChild(child);
+        const chartWheel = vi.fn();
+        child.addEventListener("wheel", chartWheel);
+        // happy-dom 的 WheelEvent 不实现 ctrlKey；用相同原生鼠标修饰键测捕获分流。
+        const ordinary = new MouseEvent("wheel", { bubbles: true, cancelable: true });
+        child.dispatchEvent(ordinary);
+        expect(chartWheel).not.toHaveBeenCalled();
+        expect(ordinary.defaultPrevented).toBe(false);
+        child.dispatchEvent(new MouseEvent("wheel", { bubbles: true, ctrlKey: true }));
+        expect(chartWheel).toHaveBeenCalledTimes(1);
+      } finally {
+        w.unmount();
+      }
+    },
+  );
 
-  it.each([5, 20, 40])("%i 个模型均保留标签，绘图区每行至少 24px", (count) => {
-    const w = mount(TrendChart, { props: { groups: models(count), by: "model" } });
+  it.each([
+    ["model", 5],
+    ["model", 20],
+    ["model", 40],
+    ["project", 5],
+    ["project", 20],
+    ["project", 40],
+    ["agent", 5],
+    ["agent", 20],
+    ["agent", 40],
+  ])("%s %i 行均保留全部标签，画布高度为 max(320, N*24+80)", (by, count) => {
+    const w = mount(TrendChart, { props: { groups: items(by, count), by } });
     try {
       const option = setOption.mock.calls[0][0];
       expect(height(w)).toBe(Math.max(320, count * 24 + 80));
-      expect(option.yAxis.axisLabel).toMatchObject({ interval: 0, hideOverlap: false });
+      expect(option.yAxis.axisLabel).toMatchObject({
+        interval: 0,
+        hideOverlap: false,
+        overflow: "truncate",
+      });
       expect(option.yAxis.data).toHaveLength(count);
     } finally {
       w.unmount();
     }
   });
 
-  it("按实际离散边界缩放收短，observer 不回写范围或重复 resize，显示全部恢复", async () => {
-    const w = mount(TrendChart, { props: { groups: models(40), by: "model" } });
-    try {
-      zoom({ start: 10, end: 60, startValue: 4, endValue: 23 });
-      expect(height(w)).toBe(20 * 24 + 80);
-      expect(echartsMock.resize).toHaveBeenCalledTimes(1);
-      const updates = setOption.mock.calls.length;
-      fireResize();
-      fireResize();
-      expect(echartsMock.resize).toHaveBeenCalledTimes(1);
-      expect(setOption.mock.calls.length).toBe(updates);
-      expect(setOption.mock.calls.slice(1).every(([option]) => !option.dataZoom)).toBe(true);
-      await w.find(".chart-reset").trigger("click");
-      // 真实 ECharts 的 dispatchAction 会同步发 datazoom；mock 单独触发。
-      zoom({ start: 0, end: 100, startValue: 0, endValue: 39 });
-      expect(height(w)).toBe(40 * 24 + 80);
-    } finally {
-      w.unmount();
-    }
-  });
+  it.each(NON_TIME_DIMS)(
+    "%s 按实际离散边界缩放收短，observer 不回写范围或重复 resize，显示全部恢复",
+    async (by) => {
+      const w = mount(TrendChart, { props: { groups: items(by, 40), by } });
+      try {
+        expect(height(w)).toBe(40 * 24 + 80);
+        zoom({ start: 10, end: 60, startValue: 4, endValue: 23 });
+        expect(height(w)).toBe(20 * 24 + 80);
+        expect(echartsMock.resize).toHaveBeenCalledTimes(1);
+        const updates = setOption.mock.calls.length;
+        fireResize();
+        fireResize();
+        expect(echartsMock.resize).toHaveBeenCalledTimes(1);
+        expect(setOption.mock.calls.length).toBe(updates);
+        expect(setOption.mock.calls.slice(1).every(([option]) => !option.dataZoom)).toBe(true);
+        await w.find(".chart-reset").trigger("click");
+        // 真实 ECharts 的 dispatchAction 会同步发 datazoom；mock 单独触发。
+        zoom({ start: 0, end: 100, startValue: 0, endValue: 39 });
+        expect(height(w)).toBe(40 * 24 + 80);
+      } finally {
+        w.unmount();
+      }
+    },
+  );
 
-  it("value 模式数据减少保留窗口跨度，不把越界端分别截断", async () => {
-    const w = mount(TrendChart, { props: { groups: models(40), by: "model" } });
+  it.each(NON_TIME_DIMS)("%s value 模式数据减少保留窗口跨度，不把越界端分别截断", async (by) => {
+    const w = mount(TrendChart, { props: { groups: items(by, 40), by } });
     try {
       zoom({ start: 10, end: 60, startValue: 4, endValue: 23, rangeMode: ["value", "value"] });
-      await w.setProps({ groups: models(20) });
+      await w.setProps({ groups: items(by, 20) });
       expect(height(w)).toBe(20 * 24 + 80);
     } finally {
       w.unmount();
     }
   });
 
-  it("数据数目变化按新类别边界计数，主题重建沿用实际可见范围与行高", async () => {
-    const w = mount(TrendChart, { props: { groups: models(40), by: "model" } });
-    try {
-      zoom({ start: 0, end: 50, startValue: 0, endValue: 20 });
-      expect(height(w)).toBe(21 * 24 + 80);
-      await w.setProps({ groups: models(20) });
-      // 缺省百分比模式：20 类中 [0, round(19*0.5)] = 11 类，而不是 21 或 10。
-      expect(height(w)).toBe(Math.max(320, 11 * 24 + 80));
-      echartsMock.getOption.mockReturnValue({
-        dataZoom: [{ start: 0, end: 50, startValue: 0, endValue: 10 }],
-      });
-      useTheme().setPreference("dark");
-      await nextTick();
-      expect(height(w)).toBe(11 * 24 + 80);
-      expect(setOption.mock.calls.at(-1)![0].dataZoom[0]).toMatchObject({
-        startValue: 0,
-        endValue: 10,
-      });
-      expect(echartsMock.on.mock.calls.filter(([name]) => name === "datazoom")).toHaveLength(2);
-    } finally {
-      w.unmount();
-      useTheme().setPreference("system");
-    }
-  });
+  it.each(NON_TIME_DIMS)(
+    "%s 数据数目变化按新类别边界计数，主题重建沿用实际可见范围与行高",
+    async (by) => {
+      const w = mount(TrendChart, { props: { groups: items(by, 40), by } });
+      try {
+        zoom({ start: 0, end: 50, startValue: 0, endValue: 20 });
+        expect(height(w)).toBe(21 * 24 + 80);
+        await w.setProps({ groups: items(by, 20) });
+        // 缺省百分比模式：20 类中 [0, round(19*0.5)] = 11 类，而不是 21 或 10。
+        expect(height(w)).toBe(Math.max(320, 11 * 24 + 80));
+        echartsMock.getOption.mockReturnValue({
+          dataZoom: [{ start: 0, end: 50, startValue: 0, endValue: 10 }],
+        });
+        useTheme().setPreference("dark");
+        await nextTick();
+        expect(height(w)).toBe(11 * 24 + 80);
+        expect(setOption.mock.calls.at(-1)![0].dataZoom[0]).toMatchObject({
+          startValue: 0,
+          endValue: 10,
+        });
+        expect(echartsMock.on.mock.calls.filter(([name]) => name === "datazoom")).toHaveLength(2);
+      } finally {
+        w.unmount();
+        useTheme().setPreference("system");
+      }
+    },
+  );
 
   it("主题重建后的用户百分比缩放覆盖旧 rangeMode，后续筛选按新类目计高", async () => {
-    const w = mount(TrendChart, { props: { groups: models(40), by: "model" } });
+    const w = mount(TrendChart, { props: { groups: items("project", 40), by: "project" } });
     try {
       echartsMock.getOption.mockReturnValue({
         dataZoom: [{ start: 0, end: 100, startValue: 0, endValue: 39 }],
@@ -425,13 +478,117 @@ describe("模型图逐行标签与可见行高", () => {
         { start: 0, end: 50, startValue: 0, endValue: 20, rangeMode: ["value", "value"] },
         { start: 0, end: 50 },
       );
-      await w.setProps({ groups: models(20) });
+      await w.setProps({ groups: items("project", 20) });
       expect(height(w)).toBe(11 * 24 + 80);
     } finally {
       w.unmount();
       useTheme().setPreference("system");
     }
   });
+
+  it("切换维度时重置缩放范围并按新维度全量类别重算高度，按时间保持 360px", async () => {
+    const w = mount(TrendChart, { props: { groups: items("project", 40), by: "project" } });
+    try {
+      zoom({ start: 0, end: 25, startValue: 0, endValue: 9 });
+      expect(height(w)).toBe(320);
+
+      await w.setProps({ groups: items("agent", 25), by: "agent" });
+      expect(height(w)).toBe(25 * 24 + 80);
+      expect(setOption.mock.calls.at(-1)![0].dataZoom[0]).toMatchObject({ start: 0, end: 100 });
+
+      await w.setProps({ groups: items("day", 40), by: "day" });
+      expect(height(w)).toBe(360);
+      echartsMock.resize.mockClear();
+      zoom({ start: 0, end: 50, startValue: 0, endValue: 19 });
+      expect(height(w)).toBe(360);
+      expect(echartsMock.resize).not.toHaveBeenCalled();
+    } finally {
+      w.unmount();
+    }
+  });
+
+  it("长项目名在轴上省略，悬浮 tooltip 显示完整项目路径", () => {
+    const longPath =
+      "/workspace/org/team/repo-group/very-long-project-directory-name-for-truncation";
+    const longLabel = "very-long-project-directory-name-for-truncation";
+    const w = mount(TrendChart, {
+      props: {
+        groups: [{ ...group(longPath, 100), label: longLabel }],
+        by: "project",
+      },
+    });
+    try {
+      const opt = setOption.mock.calls[0][0] as {
+        yAxis: { axisLabel: { formatter: (v: string) => string } };
+        tooltip: { formatter: (p: unknown) => HTMLElement };
+      };
+      const axisText = opt.yAxis.axisLabel.formatter(longLabel);
+      expect(axisText).toContain("…");
+      expect(axisText.length).toBeLessThan(longLabel.length);
+      const node = opt.tooltip.formatter([
+        { dataIndex: 0, name: axisText, seriesName: "输入", value: 100 },
+      ]);
+      expect(node.textContent).toContain(longPath);
+    } finally {
+      w.unmount();
+    }
+  });
+
+  it.each(NON_TIME_DIMS)(
+    "%s 43 行长短混排关闭 containLabel 并全量测量奇数行长名，平移缩放同步重算 grid.left",
+    (by) => {
+      const mixed = Array.from({ length: 43 }, (_, i) => {
+        const label =
+          i === 1
+            ? "DeepSeek V4.1 Flash 1017"
+            : i === 19
+              ? "DeepSeek V4 Flash 0731"
+              : i === 41
+                ? "Nemotron 3 Ultra 550B A55B"
+                : `m${String(i).padStart(2, "0")}`;
+        return { ...group(`${by}/${i}`, 43 - i), label };
+      });
+      const w = mount(TrendChart, { props: { groups: mixed, by } });
+      try {
+        const initOpt = setOption.mock.calls[0][0] as {
+          grid: { left: number; containLabel: boolean };
+          yAxis: { axisLabel: { ellipsis?: string; formatter: (v: string) => string } };
+        };
+        expect(initOpt.grid.containLabel).toBe(false);
+        expect(initOpt.yAxis.axisLabel.ellipsis).toBe("…");
+        expect(height(w)).toBe(43 * 24 + 80);
+        // 完整 43 行包含奇数行 41 的最长名称，左侧空间必须大于仅短标签时的预留。
+        const fullLeft = initOpt.grid.left;
+        expect(fullLeft).toBeGreaterThan(150);
+        expect(initOpt.yAxis.axisLabel.formatter("Nemotron 3 Ultra 550B A55B")).toBe(
+          "Nemotron 3 Ultra 550B A55B",
+        );
+
+        // 缩放到仅含短名的 [2..17]（16 行）→ 高度和 grid.left 同时收窄。
+        zoom({ start: 5, end: 40, startValue: 2, endValue: 17 });
+        const shortUpdate = setOption.mock.calls.at(-1)![0] as {
+          grid?: { left?: number };
+          dataZoom?: unknown;
+        };
+        expect(shortUpdate.dataZoom).toBeUndefined();
+        expect(shortUpdate.grid?.left).toBeDefined();
+        expect(shortUpdate.grid!.left!).toBeLessThan(fullLeft - 80);
+
+        // 同行数平移到包含索引 41 的 [27..42]（仍是 16 行，高度不变）→ grid.left 必须重新扩大。
+        const callsBeforePan = setOption.mock.calls.length;
+        zoom({ start: 63, end: 100, startValue: 27, endValue: 42 });
+        expect(setOption.mock.calls.length).toBe(callsBeforePan + 1);
+        const panUpdate = setOption.mock.calls.at(-1)![0] as {
+          grid?: { left?: number };
+          dataZoom?: unknown;
+        };
+        expect(panUpdate.dataZoom).toBeUndefined();
+        expect(panUpdate.grid?.left).toBe(fullLeft);
+      } finally {
+        w.unmount();
+      }
+    },
+  );
 });
 
 describe("TrendChart 生命周期与数据更新（UX05）", () => {
@@ -817,6 +974,65 @@ describe("TrendChart 隐藏页面重建（v0.9.1 缺陷 A）", () => {
       expect(echartsMock.resize.mock.calls.length).toBe(resizes);
     } finally {
       await teardown(w);
+    }
+  });
+});
+
+describe("TrendChart 大数刻度与任意精度 tooltip", () => {
+  afterEach(() => {
+    setLocale(DEFAULT_LOCALE);
+  });
+
+  it("中文刻度支持万亿与 ≥ 10¹⁶ 科学计数法，英文支持 T 与 ≥ 10¹⁵ 科学计数法，tooltip 展示精确 BigInt", async () => {
+    const exactInput = "12345678901234567890123";
+    const hugeGroup: Group = {
+      key: "huge-model",
+      label: "Huge Model",
+      requests: 100,
+      tokens: {
+        input: exactInput,
+        output: "456",
+        cache_write: 0,
+        cache_read: 0,
+      },
+      cost_usd: 0,
+      unknown_pricing: false,
+      unknown_tokens: { input: 0, output: 0, cache_write: 0, cache_read: 0 },
+    };
+    const w = mount(TrendChart, { props: { groups: [hugeGroup], by: "model" } });
+    try {
+      await flushPromises();
+      const opt = setOption.mock.calls.at(-1)![0] as {
+        xAxis: { axisLabel: { formatter: (v: number) => string } };
+        tooltip: { formatter: (p: unknown) => HTMLElement };
+      };
+      // 中文刻度：万亿 + ≥ 10¹⁶ 科学计数法
+      expect(opt.xAxis.axisLabel.formatter(2_500_000_000_000)).toBe("2.5万亿");
+      expect(opt.xAxis.axisLabel.formatter(1.24e16)).toBe("1.2 × 10¹⁶");
+
+      // tooltip 即使在 ECharts 传入被 f64 截断的 value 时，仍优先展示原始任意精度整数
+      const tip = opt.tooltip.formatter([
+        {
+          dataIndex: 0,
+          seriesIndex: 0,
+          name: "Huge Model",
+          seriesName: "输入",
+          value: Number(exactInput),
+        },
+      ]);
+      expect(tip.textContent).toContain("12,345,678,901,234,567,890,123");
+
+      // 切换英文：T + ≥ 10¹⁵ 科学计数法
+      setLocale("en-US");
+      await nextTick();
+      await flushPromises();
+      const optEn = setOption.mock.calls.at(-1)![0] as {
+        xAxis: { axisLabel: { formatter: (v: number) => string } };
+      };
+      expect(optEn.xAxis.axisLabel.formatter(2_500_000_000_000)).toBe("2.5T");
+      expect(optEn.xAxis.axisLabel.formatter(1.24e15)).toBe("1.2 × 10¹⁵");
+    } finally {
+      w.unmount();
     }
   });
 });

@@ -2666,4 +2666,64 @@ describe("Dashboard v0.9.9 升级（v24 视图快照拒读）", () => {
     expect(invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save")).toHaveLength(0);
     w.unmount();
   });
+
+  it("v25_snapshot_without_row_id_is_rejected_and_rebuilt_as_v26：旧 v25 快照不恢复，首查重建为 v26", async () => {
+    useV24Preferences();
+    const v25Payload = { ...v24Payload(), v: 25 };
+    let resolveSummary!: (v: SummaryReport) => void;
+    let resolveEvents!: (v: EventList) => void;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "query_begin") return Promise.resolve(queryInfo);
+      if (cmd === "view_cache_load") return Promise.resolve(v25Payload);
+      if (cmd === "query_summary") return new Promise((r) => (resolveSummary = r));
+      if (cmd === "query_events") return new Promise((r) => (resolveEvents = r));
+      if (cmd === "source_status") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    const w = mountDashboard();
+    await flushPromises();
+    expect(state(w)["report"], "缺 row_id 的 v25 快照不得恢复为首帧").toBeNull();
+    expect(state(w)["events"], "缺 row_id 的 v25 明细不得恢复为首帧").toBeNull();
+    expect(state(w)["stale"]).toBe(false);
+
+    resolveSummary(v24Report(V24_NEW_LABEL));
+    resolveEvents({
+      ...events,
+      rows: [
+        {
+          ts: "2026-10-05 10:00:00",
+          record_id: "rid-1",
+          cursor: JSON.stringify({
+            v: 2,
+            qid: queryInfo.queryId,
+            mfp: "m",
+            dfp: "d",
+            ts: "2026-10-05T02:00:00Z",
+            rid: "rid-1",
+            seq: 0,
+          }),
+          row_id: "event:1",
+          agent: "claude-code",
+          model: "deepseek-v4-flash",
+          session_id: "s-1",
+          project: "/workspace/app",
+          input: 1000,
+          output: 200,
+          cache_write: 0,
+          cache_read: 0,
+          cost_usd: 0.01,
+        },
+      ],
+      total: 1,
+    });
+    await flushPromises();
+    await nextTick();
+    await flushPromises();
+    await snapshotQueueIdle();
+    const save = invokeMock.mock.calls.filter((c) => c[0] === "view_cache_save").at(-1);
+    const saved = (save?.[1] as { value: { v: number; events: EventList } }).value;
+    expect(saved.v).toBe(26);
+    expect(saved.events.rows[0]?.row_id).toBe("event:1");
+    w.unmount();
+  });
 });

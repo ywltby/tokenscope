@@ -1664,4 +1664,105 @@ describe("query coherence and reactivation regressions", () => {
     vi.useRealTimers();
     expect(after).toBe(before + 1);
   });
+
+  it("scroll reset keys stay stable on same-filter refresh and reset only affected lists on filter change", async () => {
+    let qn = 1;
+    let currentBy = "day";
+    let failNext = false;
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "view_cache_load") return Promise.resolve(null);
+      if (cmd === "source_status") return Promise.resolve([]);
+      if (cmd === "query_begin") {
+        if (failNext) {
+          failNext = false;
+          return Promise.reject(new Error("transient begin error"));
+        }
+        currentBy = String(args?.by ?? "day");
+        const id = `q-${qn++}`;
+        return Promise.resolve({
+          ...handle,
+          queryId: id,
+          generation: qn,
+        });
+      }
+      if (cmd === "query_summary") {
+        return Promise.resolve({
+          ...reportA,
+          by: currentBy,
+          query_id: String(args?.queryId),
+        });
+      }
+      if (cmd === "query_events") {
+        return Promise.resolve({
+          ...listOf(["e-1", "e-2"], 2),
+          query_id: String(args?.queryId),
+        });
+      }
+      return Promise.resolve(null);
+    });
+    const w = mountHost();
+    await flushPromises();
+    const s0 = api.summaryResetKey.value;
+    const e0 = api.eventsResetKey.value;
+
+    // 1) 后台自动刷新与手动刷新（同筛选）：双表重置键均不变
+    api.notifyUsageUpdated(99);
+    await flushPromises();
+    expect(api.summaryResetKey.value).toBe(s0);
+    expect(api.eventsResetKey.value).toBe(e0);
+
+    api.manualRefresh();
+    await flushPromises();
+    expect(api.summaryResetKey.value).toBe(s0);
+    expect(api.eventsResetKey.value).toBe(e0);
+
+    // 2) 下钻筛选与清除下钻：只变请求明细重置键，聚合表重置键不变
+    api.onSummaryRowClick("2026-10-01");
+    await flushPromises();
+    expect(api.summaryResetKey.value).toBe(s0);
+    expect(api.eventsResetKey.value).not.toBe(e0);
+    const eDrill = api.eventsResetKey.value;
+
+    api.clearDrill();
+    await flushPromises();
+    expect(api.summaryResetKey.value).toBe(s0);
+    expect(api.eventsResetKey.value).toBe(e0);
+    expect(api.eventsResetKey.value).not.toBe(eDrill);
+
+    // 3) 切换维度：只变聚合表重置键，请求明细重置键不变
+    api.by.value = "model";
+    await flushPromises();
+    expect(api.summaryResetKey.value).not.toBe(s0);
+    expect(api.eventsResetKey.value).toBe(e0);
+    const sModel = api.summaryResetKey.value;
+
+    // 4) 切换时间范围（先模拟一次失败不提前变更，再成功切换）：双表重置键同时变化
+    failNext = true;
+    api.preset.value = { kind: "days", days: 7 };
+    await flushPromises();
+    expect(api.summaryResetKey.value, "失败的筛选请求不得提前重置旧视图").toBe(sModel);
+    expect(api.eventsResetKey.value).toBe(e0);
+
+    api.retryAfterFailure("summary");
+    await flushPromises();
+    expect(api.summaryResetKey.value).not.toBe(sModel);
+    expect(api.eventsResetKey.value).not.toBe(e0);
+    const s7d = api.summaryResetKey.value;
+    const e7d = api.eventsResetKey.value;
+
+    // 5) 切换来源与日粒度模式：双表重置键均变化
+    api.agent.value = "claude";
+    await flushPromises();
+    expect(api.summaryResetKey.value).not.toBe(s7d);
+    expect(api.eventsResetKey.value).not.toBe(e7d);
+    const sClaude = api.summaryResetKey.value;
+    const eClaude = api.eventsResetKey.value;
+
+    api.setRollupsMode("detail_only");
+    await flushPromises();
+    expect(api.summaryResetKey.value).not.toBe(sClaude);
+    expect(api.eventsResetKey.value).not.toBe(eClaude);
+
+    w.unmount();
+  });
 });

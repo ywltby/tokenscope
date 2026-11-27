@@ -27,7 +27,9 @@ use crate::openrouter;
 mod model_stats;
 mod rollup;
 
-pub use crate::model_display::{DisplayNameReason, DisplayNameResolution};
+pub use crate::model_display::{
+    DisplayNameReason, DisplayNameResolution, SnapshotAvailability, SourceLookupStatus,
+};
 
 const TIER_EXTERNAL: u8 = 0;
 const TIER_MODELSDEV: u8 = 1;
@@ -1344,6 +1346,7 @@ pub struct MatchedCandidate {
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CostLine {
     pub kind: CostLineKind,
+    #[serde(with = "crate::bigint::serde_u64")]
     pub tokens: u64,
     /// USD / 百万 token；None = 该分项缺价。
     pub unit_price: Option<f64>,
@@ -1422,8 +1425,8 @@ impl CostEstimate {
     /// 实际用量同样算依据（金额 0 不等于无依据）；零 token 的未使用分项
     /// 既不制造已知小计，也不制造缺价。
     pub fn covers_used_tokens(&self, used: &TokenCounts) -> bool {
-        let total = used.total();
-        total > 0 && self.unknown.total() < total
+        let total = used.total_u128();
+        total > 0 && self.unknown.total_u128() < total
     }
 }
 
@@ -2471,6 +2474,16 @@ impl Pricing {
         Self::build_from_reads(reads)
     }
 
+    fn availability_for(file: &SourceFile) -> model_display::SnapshotAvailability {
+        match file.health {
+            SourceHealth::Ok { .. } => model_display::SnapshotAvailability::Available,
+            SourceHealth::NotConfigured | SourceHealth::NotFound => {
+                model_display::SnapshotAvailability::NotSynced
+            }
+            SourceHealth::ReadFailed { .. } => model_display::SnapshotAvailability::LoadFailed,
+        }
+    }
+
     /// 从已读取的来源文本构建价格表（读取失败层跳过，由 health/告警表达）。
     fn build_from_reads(reads: SourceReads) -> PricingLoadOutcome {
         let cacheable = !reads.any_read_failed();
@@ -2480,16 +2493,18 @@ impl Pricing {
         let mut raw_modelsdev_count = 0usize;
         let mut raw_openrouter_count = 0usize;
         let mut modelsdev_synced_at = None;
+        let mut modelsdev_avail = Self::availability_for(&reads.modelsdev);
+        let mut openrouter_avail = Self::availability_for(&reads.openrouter);
+        let mut modelsdev_snap: Option<crate::modelsdev::Snapshot> = None;
+        let mut openrouter_snap: Option<openrouter::Snapshot> = None;
 
         if let Some(text) = reads.modelsdev.text.as_deref() {
             match crate::modelsdev::parse_snapshot_text(text) {
                 Ok(snapshot) => {
                     pricing.model_stats = model_stats::ModelStatsGrouping::from_snapshot(&snapshot);
-                    pricing.display_names =
-                        model_display::NameCatalog::from_snapshot(Some(&snapshot));
                     raw_modelsdev_count = snapshot.entries.len();
                     modelsdev_synced_at = Some(snapshot.synced_at.clone());
-                    for e in snapshot.entries {
+                    for e in &snapshot.entries {
                         // Task 2：快照分段（models.dev size 语义已在同步时
                         // 转换为规范 [min, max)）→ PriceSegment。非法规则
                         // 防御性丢弃分段只留基础价，并给出诊断。
@@ -2519,7 +2534,7 @@ impl Pricing {
                         let base = PriceRates {
                             // N18：Anthropic 官方渠道按发布价自证派生 1h 档；
                             // 其他渠道/无依据一律 None（分档价未知）。
-                            cache_write_tiers: modelsdev_cache_write_tiers(&e),
+                            cache_write_tiers: modelsdev_cache_write_tiers(e),
                             ..PriceRates::from_options(
                                 e.input,
                                 e.output,
@@ -2576,14 +2591,16 @@ impl Pricing {
                         }
                         pricing.add_entry(Entry {
                             prefix: match_key(&e.id),
-                            display: e.id,
-                            name: e.name,
+                            display: e.id.clone(),
+                            name: e.name.clone(),
                             plan,
                             tier: TIER_MODELSDEV,
                         });
                     }
+                    modelsdev_snap = Some(snapshot);
                 }
                 Err(e) => {
+                    modelsdev_avail = model_display::SnapshotAvailability::LoadFailed;
                     let path = reads
                         .modelsdev
                         .path
@@ -2601,7 +2618,7 @@ impl Pricing {
             match openrouter::parse_snapshot_text(text) {
                 Ok(snapshot) => {
                     raw_openrouter_count = snapshot.entries.len();
-                    for e in snapshot.entries {
+                    for e in &snapshot.entries {
                         // Task 3：OpenRouter overrides（USD/token，inclusive
                         // 下界：prompt >= min 即命中）→ 规范分段 [min,
                         // next_min) 并 ×1e6 统一为 USD/百万 token；基础价
@@ -2650,7 +2667,7 @@ impl Pricing {
                                 // T1（2026-11-13）：官方渠道发布价自证派生
                                 // 5m/1h 分档（与 models.dev Anthropic 同规
                                 // 则）；其他渠道/自证不过 → None。
-                                cache_write_tiers: openrouter_cache_write_tiers(&e),
+                                cache_write_tiers: openrouter_cache_write_tiers(e),
                             },
                             segments,
                             schedules: Vec::new(),
@@ -2677,14 +2694,16 @@ impl Pricing {
                         }
                         pricing.add_entry(Entry {
                             prefix: match_key(&e.id),
-                            display: e.id,
-                            name: e.name,
+                            display: e.id.clone(),
+                            name: e.name.clone(),
                             plan: or_plan,
                             tier: TIER_OPENROUTER,
                         });
                     }
+                    openrouter_snap = Some(snapshot);
                 }
                 Err(e) => {
+                    openrouter_avail = model_display::SnapshotAvailability::LoadFailed;
                     let path = reads
                         .openrouter
                         .path
@@ -2697,6 +2716,13 @@ impl Pricing {
                 }
             }
         }
+
+        pricing.display_names = model_display::NameCatalog::from_snapshots(
+            modelsdev_snap.as_ref(),
+            modelsdev_avail,
+            openrouter_snap.as_ref(),
+            openrouter_avail,
+        );
 
         if let (Some(path), Some(text)) = (
             reads.external.path.as_deref(),
@@ -3192,8 +3218,10 @@ impl Pricing {
         if resolution.name.is_none() {
             log::debug!(
                 target: "tokenscope::display_name",
-                "保留原始模型 ID model={model} reason={reason}",
+                "保留原始模型 ID model={model} reason={reason} modelsdev={md} openrouter={or}",
                 reason = resolution.reason.as_str(),
+                md = resolution.modelsdev_status.as_str(),
+                or = resolution.openrouter_status.as_str(),
             );
         }
         resolution.name
@@ -3413,14 +3441,39 @@ impl Pricing {
             let has_empty_key = index.entries.iter().any(|e| empty_model_key(&e.display));
             if !has_invalid && !stale_keys && !has_empty_key {
                 let mut pricing = Self::from_index(&index);
-                if let Some(text) = reads.modelsdev.text.as_deref()
-                    && let Ok(snapshot) = crate::modelsdev::parse_snapshot_text(text)
-                {
-                    // 旧价格索引无须升级：用同一签名下冻结的目录元数据恢复展示键。
-                    pricing.model_stats = model_stats::ModelStatsGrouping::from_snapshot(&snapshot);
-                    pricing.display_names =
-                        model_display::NameCatalog::from_snapshot(Some(&snapshot));
-                }
+                let mut modelsdev_avail = Self::availability_for(&reads.modelsdev);
+                let mut openrouter_avail = Self::availability_for(&reads.openrouter);
+                let modelsdev_snap = match reads.modelsdev.text.as_deref() {
+                    Some(text) => match crate::modelsdev::parse_snapshot_text(text) {
+                        Ok(snapshot) => {
+                            // 旧价格索引无须升级：用同一签名下冻结的目录元数据恢复展示键。
+                            pricing.model_stats =
+                                model_stats::ModelStatsGrouping::from_snapshot(&snapshot);
+                            Some(snapshot)
+                        }
+                        Err(_) => {
+                            modelsdev_avail = model_display::SnapshotAvailability::LoadFailed;
+                            None
+                        }
+                    },
+                    None => None,
+                };
+                let openrouter_snap = match reads.openrouter.text.as_deref() {
+                    Some(text) => match openrouter::parse_snapshot_text(text) {
+                        Ok(snapshot) => Some(snapshot),
+                        Err(_) => {
+                            openrouter_avail = model_display::SnapshotAvailability::LoadFailed;
+                            None
+                        }
+                    },
+                    None => None,
+                };
+                pricing.display_names = model_display::NameCatalog::from_snapshots(
+                    modelsdev_snap.as_ref(),
+                    modelsdev_avail,
+                    openrouter_snap.as_ref(),
+                    openrouter_avail,
+                );
                 let arc = std::sync::Arc::new(pricing);
                 *guard = Some((sig.clone(), arc.clone(), index.warnings.clone()));
                 return (arc, sig, index.warnings, true);
@@ -4360,6 +4413,7 @@ mod tests {
                     ov(1_000_000, "0.000008", None),
                 ],
             }],
+            names: Vec::new(),
         };
         std::fs::write(&snap, serde_json::to_string(&snapshot).unwrap()).unwrap();
         let (p, warnings) = Pricing::load(None, None, Some(&snap));

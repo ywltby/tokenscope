@@ -38,7 +38,7 @@ use crate::history::{
     DailyRollupWrite, EventAlias, EventOrigin, EventWrite, HistoryDb, ImportRunRecord,
     ORIGIN_KIND_CCS_REQUEST, RollupClass, RollupConflictPolicy, WriteClass, WritePrecedence,
 };
-use crate::model::{AgentKind, TokenCounts};
+use crate::model::{AgentKind, BigTokenCounts, TokenCounts};
 
 /// 逻辑来源标识：本期只支持一个 CCS 逻辑来源——文件路径与导入时刻不充当用量
 /// 身份，换成同一库的备份再导入仍更新同一逻辑来源（计划 §5.3）。
@@ -430,7 +430,7 @@ pub struct ImportPreview {
     pub overlap_unresolved: bool,
     /// 重叠候选样例（最多 5 条，供用户判断）。
     pub overlap_examples: Vec<String>,
-    pub net_new_tokens: TokenCounts,
+    pub net_new_tokens: BigTokenCounts,
     pub rollups_total: u64,
     pub rollups_new: u64,
     pub rollups_unchanged: u64,
@@ -458,7 +458,7 @@ pub struct ImportReport {
     pub requests_overlap: u64,
     pub rollups_snapshotted: u64,
     pub rollups_conflicted: u64,
-    pub net_new_tokens: TokenCounts,
+    pub net_new_tokens: BigTokenCounts,
     pub generation_after: u64,
 }
 
@@ -551,7 +551,7 @@ pub fn preview_with_limits(
         would_overlap: 0,
         overlap_unresolved: false,
         overlap_examples: Vec::new(),
-        net_new_tokens: TokenCounts::default(),
+        net_new_tokens: BigTokenCounts::default(),
         rollups_total: rollups.len() as u64,
         rollups_rejected: 0,
         rollups_new: 0,
@@ -624,10 +624,7 @@ pub fn preview_with_limits(
         match class {
             WriteClass::Insert => {
                 preview.would_insert += 1;
-                preview.net_new_tokens = preview
-                    .net_new_tokens
-                    .checked_add(&w.tokens)
-                    .ok_or_else(|| anyhow::anyhow!("净新增用量溢出可表示范围"))?;
+                preview.net_new_tokens.add_counts(&w.tokens);
             }
             WriteClass::Update => preview.would_update += 1,
             WriteClass::Unchanged => preview.would_unchanged += 1,
@@ -644,7 +641,7 @@ pub fn preview_with_limits(
                         label,
                         w.model_raw,
                         w.ts,
-                        w.tokens.total()
+                        w.tokens.total_u128()
                     ));
                 }
             }

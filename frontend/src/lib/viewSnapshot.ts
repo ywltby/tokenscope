@@ -48,6 +48,10 @@ import { invoke } from "@tauri-apps/api/core";
  * v13 = 日汇总费用覆盖判定（v0.9.2）——unknown_tokens/
  * unknown_pricing 的语义从「汇总 token 全部未定价」改为「实际未获费用
  * 覆盖」；旧快照的费用状态列与未知读数不再可信，读取时忽略重建；
+ * v26 = 「跨刷新稳定明细行标识」：明细行携带独立于 query_id 的 `row_id`
+ * （原生请求 `event:<id>`、CCS 日汇总四元组），v25 及更早快照缺少该字段会导致
+ * 缓存首帧切换到首批新数据时锚点失配，读取时忽略并由首次成功查询自动重建；
+ * 筛选偏好、时区与历史数据不受影响。
  * v25 = 「独立展示名目录」：裸 ID 在多渠道命中时改用公开规范模型名，
  * v24 快照的模型标签不再可信，读取时忽略重建；筛选偏好、时区与历史数据不受影响。
  * v24 = 「展示名质量分级」：正式模型名优先于渠道填入的 ID 抄写，旧快照的
@@ -61,7 +65,7 @@ import { invoke } from "@tauri-apps/api/core";
  * session/project，v9 及更早快照的分组与下钻 key 不再可信；
  * v9 = 模型匹配规则（等价键）；v8 = 项目根归并；v7 = 统一项目身份；
  * v6 = 查询会话契约（SF04）；v5 及更早版本不含会话身份且游标为旧格式。 */
-export const SNAPSHOT_VERSION = 25;
+export const SNAPSHOT_VERSION = 26;
 
 export type SnapshotDispatch = (payload: unknown) => Promise<void>;
 

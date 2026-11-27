@@ -49,8 +49,22 @@ describe("费用显示状态（v0.9.3）", () => {
 
   it("仅按零估算标记、unknown=0：普通文字色", () => {
     const g = group({ total_cost_usd: 0, cache_price_zero_estimated: true });
-    expect(unknownTokenTotal(g.unknown_tokens)).toBe(0);
+    expect(unknownTokenTotal(g.unknown_tokens)).toBe(0n);
     expect(costDisplayTone(g)).toBe("normal");
     expect(costDisplayText(g, "未知")).toBe("$0.00");
+  });
+
+  it("超大字符串 unknown_tokens 仍按任意精度判为警告态", () => {
+    const g = group({
+      total_cost_usd: 1,
+      unknown_tokens: {
+        input: "18446744073709551616",
+        output: "5",
+        cache_write: 0,
+        cache_read: 0,
+      },
+    });
+    expect(unknownTokenTotal(g.unknown_tokens)).toBe(18446744073709551621n);
+    expect(costDisplayTone(g)).toBe("warning");
   });
 });
