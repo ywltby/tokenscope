@@ -1,6 +1,6 @@
 # 新增 Antigravity CLI（`antigravity-cli`）用量来源实施计划
 
-> 状态：**已按三轮审查意见修订（2026-11-28），待最终确认后开工（方案文档，尚不分配发行版本）**。
+> 状态：**已按四轮审查意见完成全部口径与验收条款定稿（2026-11-28，P1 已关闭），待用户最终确认后按 AG01–AG08 开工（方案文档，尚不分配发行版本）**。
 >
 > 用户 2026-11-28 已拍板口径与确认项：
 > 1. **数据源与历史模型补齐策略（方案 A）**：主流程只读 `brain/<id>/.system_generated/logs/transcript.jsonl`，并严格只读同根目录 `conversation_summaries.db` 补工作区路径 `workspace_uris`；不打开、不解析内部 `conversations/*.db` Protobuf；
@@ -14,10 +14,10 @@
 **Goal：** TokenScope 只读采集本机 Antigravity CLI（`~/.gemini/antigravity-cli`）的本地会话与子代理转写用量，作为第五个独立应用纳入统一历史库、汇总、筛选、下钻、计价与来源管理；现有 Claude Code / Codex / WorkBuddy / WorkBuddy AI 的统计结果零变化。
 
 **Architecture：**
-- 新增独立适配器 `crates/tokenscope-core/src/source/antigravity_cli.rs`：只发现 `<root>/brain/<conv_id>/.system_generated/logs/transcript.jsonl`（若用户手动指向 `brain/` 目录，也允许直接匹配其下 `<conv_id>/.system_generated/logs/transcript.jsonl`），天然排除 `transcript_full.jsonl`、`chunks/**/*.jsonl`、`conversations/*.db` 与其它非目标文件；对可原地改写的 `transcript.jsonl` 在文件指纹中纳入内容摘要，确保等长同 `mtime` 改写在 `refresh = false` 正常路径下仍可靠重解析。
-- 工作区路径（`cwd`）通过同根 `<root>/conversation_summaries.db` 在**读取期间持有操作系统写入/删除保护**获取一致视图：Windows 上以 `OpenOptions::new().read(true).share_mode(FILE_SHARE_READ)`（拒绝共享写与删除）短暂持柄读取主库、检查 `-journal` 并读取可选 `-wal`（已在本机实测：活跃运行的 `agy.exe` 不长期占用写句柄，`FILE_SHARE_READ` 可正常打开；若写者正持柄或存在非空 `-journal`，立即失败返回 `Unusable`，绝不读入提交前写回主库的脏页，也绝不在源目录创建 `-shm`），释柄后在纯内存执行官方 WAL 三分类校验重放并由 `rusqlite 0.40.2` 内置 `serialize` 的 `deserialize_read_exact(MAIN_DB, image.as_slice(), image.len(), true)` 载入 `:memory:`，仅查询 `(conversation_id, workspace_uris)` 两列。单轮采集的 `collection_key`、解析器与 `remember_collection` 共用同一份冻结映射实例。
-- 历史库 `history.db`（v5 → v6，纯增量新表 `event_file_observations`）为 `AntigravityCli` 按强身份记录每个源文件的最新观察，再在所有当前文件最新观察上应用统一跨文件代表规则与「当前观察优先、全部缺失才回退库内已存值」的项目防降级规则，确保任意多轮跨根/同文件改写均与冷库全扫严格收敛一致。
-- 隐私政策修订为共同同意修订 4（如实披露 `USER_INPUT.content` 尾部 `<USER_SETTINGS_CHANGE>` 块与 `conversation_summaries.db` 原始页短暂内存载入边界），设置格式修订为 v4（新增 `sources.antigravity_cli`，`4->4` 恒等迁移）；Rust / PowerShell / Node 三处验收入口在首笔写盘前统一完成根、已有树（含联接与硬链接 `nlink > 1`）与拟写目标全路径预检。
+- 新增独立适配器 `crates/tokenscope-core/src/source/antigravity_cli.rs`：只发现 `<root>/brain/<conv_id>/.system_generated/logs/transcript.jsonl`（若用户手动指向 `brain/` 目录，也允许直接匹配其下 `<conv_id>/.system_generated/logs/transcript.jsonl`），天然排除 `transcript_full.jsonl`、`chunks/**/*.jsonl`、`conversations/*.db` 与其它非目标文件；对可原地改写的 `transcript.jsonl` 由解析器直接对实际读入字节计算并回传 SHA-256 内容指纹，确保等长同 `mtime` 改写在 `refresh = false` 正常路径下仍可靠重解析且不出现探测与解析内容错配。
+- 工作区路径（`cwd`）通过同根 `<root>/conversation_summaries.db` 在**读取期间持有操作系统写入/删除保护**获取一致视图：Windows 上以 `OpenOptions::new().read(true).share_mode(FILE_SHARE_READ)`（拒绝共享写与删除）短暂持柄读取主库、检查 `-journal` 并读取可选 `-wal`（已在本机实测：活跃运行的 `agy.exe` 不长期占用写句柄，`FILE_SHARE_READ` 可正常打开；若写者正持柄或存在非空 `-journal`，立即失败返回 `Unusable`，绝不读入提交前写回主库的脏页，也绝不在源目录创建 `-shm`），释柄后在纯内存执行官方 WAL 三分类校验重放并由 `rusqlite 0.40.2` 内置 `serialize` 的 `deserialize_read_exact(MAIN_DB, image.as_slice(), image.len(), true)` 载入 `:memory:`，仅查询 `(conversation_id, workspace_uris)` 两列。单次查询/采集的 `recent_collection`、`collection_key`、解析器、`remember_collection` 与 `main_fingerprint` 共用同一份冻结映射实例。
+- 历史库 `history.db`（v5 → v6，纯增量新表 `event_file_observations`）为 `AntigravityCli` 按强身份记录每个源文件的最新观察，再在所有当前文件最新观察上应用统一跨文件代表规则、全零终值退选规则（仅在文件成功完整解析时生效；删除/停用/读错仍保留历史）与「当前观察优先、全部缺失才回退库内已存值」的项目防降级规则，确保任意多轮跨根/同文件改写均与冷库全扫严格收敛一致。
+- 隐私政策修订为共同同意修订 4（如实披露 `USER_INPUT.content` 尾部 `<USER_SETTINGS_CHANGE>` 块与 `conversation_summaries.db` 原始页短暂内存载入边界），设置格式修订为 v4（新增 `sources.antigravity_cli`，`4->4` 恒等迁移）；Rust（含直接启动追加 `acceptance-trace.jsonl` 前）/ PowerShell / Node 三处验收入口在首笔写盘前统一完成根、受保护清单（含 `.cc-switch` 与 `.gemini/antigravity-cli`）、已有树（含联接与硬链接 `nlink > 1`）与拟写目标全路径预检。
 
 **Tech Stack：** Rust（`tokenscope` 核心库、`tokenscope-app` 桌面壳，`rusqlite 0.40.2` 启用内置 `serialize` 特性，零新外部 crate）、Vue 3 + Naive UI、SQLite 历史库、PowerShell / Python / Node 原生验收脚本。
 
@@ -44,11 +44,11 @@
 | --- | --- |
 | 应用枚举泛化 | WB01 已完成：`AgentKind::ALL`、`AgentSources::config(AgentKind)`、`acceptance::source_dir_override(AgentKind)` 均已按枚举分发，无需前置泛化阶段 |
 | 历史库 v5 → v6 与多文件观察 | `HISTORY_SCHEMA_VERSION = 5`（`tests/history_migration.rs:537` 等处断言 `== 5` 需同步为常量或 6）；`event_origins` 会登记败者来源（`history.rs:2862`），故需在 v6 增设 `event_file_observations` 表（纯增量迁移，与本版 `SETTINGS_FORMAT_REVISION = 4` 共用同一新持久格式组，不额外增加升级基线数）并让 `dedupe.rs` 透传跨文件副观察，同时在 AG01 补真实 v5 升级回归 |
-| 文件指纹与等长改写 | `report.rs:1488` 当前只按 `size:mtime_ms` 判文件缓存命中；对可原地等长改写的 `AntigravityCli` `transcript.jsonl`，必须把内容摘要纳入文件指纹，才能让 `80 → 60` 同长度同 `mtime` 改写在 `refresh = false` 正常入口下可靠更新 |
+| 文件指纹与等长改写 | `report.rs:1488`/`:1508` 当前只按 `size:mtime_ms` 判缓存命中并在解析前后复核；对可原地等长改写的 `AntigravityCli` `transcript.jsonl`，需让解析器直接对实际读入字节计算并回传 `sha256`、`report.rs` 复核并登记实际读入字节的摘要，杜绝 `A → B → A` 探测/解析错配并保证 `80 → 60` 同长度同 `mtime` 改写在 `refresh = false` 下可靠更新 |
 | 计价层与展示名约定 | `pricing.rs:1510` 外置模型条目必填键为 `prefix`；`collect_candidates`（`pricing.rs:2887`）按末段等价键匹配 → 须在汇总与明细共用的计价入口拦截 `AntigravityCli` 的 `UNKNOWN_MODEL`。按 `docs/stats-semantics.md:699`，名称目录无匹配时最终模型分组 `Group.label` 取原始模型 ID 代表（即 `Some("unknown")`），而非 `None` |
-| `rusqlite 0.40.2` 内存反序列化 | 已核对本地缓存 `rusqlite-0.40.2/src/serialize.rs`：`serialize = []` 为零额外依赖的内置特性，提供 `Connection::deserialize_read_exact(MAIN_DB, image.as_slice(), image.len(), true)` |
-| 采集键与冻结映射 | `report.rs:707`/`978`/`1065` 的单飞采集须让 `collection_key`、解析器与 `remember_collection` 消费同一份冻结工作区映射，避免键与内容失配 |
-| 验收保护三处入口 | `acceptance.rs:316`、`scripts/prepare-native-acceptance.ps1:93/:107`（旧根复用需同步拦截内部联接与硬链接 `nlink > 1`，对齐 `native-single-instance.mjs:681`）、`frontend/scripts/lib/native-single-instance.mjs:116` 三处均须补齐 `.gemini/antigravity-cli` 与写前全路径预检 |
+| `rusqlite 0.40.2` 内存反序列化 | 已核对本地缓存 `rusqlite-0.40.2/src/serialize.rs`：`serialize = []` 为零额外依赖的内置特性，提供 `Connection::deserialize_read_exact(MAIN_DB, image.as_slice(), image.len(), true)`；`config.rs` 内置 `DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE` 供 WAL 状态 A 夹具禁用关闭时自动 checkpoint |
+| 采集键、查询复用与冻结映射 | `query.rs:561`（`begin_query_with(..., false)` → `recent_collection` + `main_fingerprint`）与 `report.rs:707`/`978`/`1065` 的单飞采集须共用同一份冻结工作区映射，避免仅修改摘要库时复用旧缓存或出现键/解析/查询指纹修订分裂 |
+| 验收保护三处入口 | `acceptance.rs:316`（需补齐 `.cc-switch` 与 `.gemini/antigravity-cli`，并在直接启动首次写 `acceptance-trace.jsonl` 前完成整树联接与硬链接 `nlink > 1` 预检）、`scripts/prepare-native-acceptance.ps1:93/:107`（旧根复用同步拦截内部联接与硬链接 `nlink > 1`，对齐 `native-single-instance.mjs:681`）、`frontend/scripts/lib/native-single-instance.mjs:116` 三处统一写前全路径预检 |
 | 持久格式与协议门禁 | `SETTINGS_FORMAT_REVISION = 3 → 4`、`HISTORY_SCHEMA_VERSION = 5 → 6`、`PRIVACY_POLICY_REVISION = 3 → 4`、`PARSER_REVISION = 3`、`PARSE_RULES_REVISION = 7`、`INDEX_VERSION = 11`；`upgrade_baselines.py select --current-version 0.10.0` 当前选中 6 起点，不超 `MAX_ORIGINS = 6` |
 
 ---
@@ -96,13 +96,14 @@
    - 仅接纳两类已完成步骤：① `type == "PLANNER_RESPONSE" && source == "MODEL" && status == "DONE"`；② 至少携带一个 token 字段的 `type == "CHECKPOINT" && source == "SYSTEM" && status == "DONE"`（早期无 token 字段的 `CHECKPOINT` 静默跳过，不计坏行）。未完成步骤（`status != "DONE"`）不产出事件、不占去重身份。
    - 文件内按 `step_index` 收敛（后写覆盖前写）；缺失/非非负整数 `step_index` 的合资格用量行计 `bad_lines` 跳过。
    - 强身份方案 **`antigravity-cli-step`** = `"{session_id}|{step_index}"`（`record_id = step_index.to_string()`），在 `dedupe.rs` 与 `history.db` 中受 `app = "antigravity-cli"` 隔离，不与任何其他应用合并。
-   - **Antigravity `transcript.jsonl` 内容指纹（识别等长同 `mtime` 改写）**：在 `report.rs` 的逐文件缓存命中判断中，对 `AgentKind::AntigravityCli` 的文件指纹采用 `size:mtime_ms:sha256`（仅针对 Antigravity CLI，不影响现有四应用快路径），确保即便 `80 → 60` 等长改写且 `mtime_ms` 完全相同，正常 `refresh = false` 入口仍可靠识别内容变化并重解析。
-   - **按强身份维护每文件最新观察 + 跨文件代表重算（增量与冷库严格等价）**：
+   - **Antigravity `transcript.jsonl` 内容指纹（基于实际读入字节，杜绝探测/解析错配）**：在 `report.rs` 的逐文件缓存命中判断中，仅对 `AgentKind::AntigravityCli` 采用 `size:mtime_ms:sha256`（不影响其余四应用快路径）；解析器在单次读入完整字节缓冲后直接计算并随 `FileParse` 回传实际读入字节的 `content_sha256`，`report.rs` 复核解析后文件大小、`mtime` 与内容摘要均与**实际读入字节**一致后才登记该 `sha256`（若探测与解析间发生 `A → B → A` 等长切换，立即判 `unstable` 拒绝登记指纹），确保等长同 `mtime` 改写在 `refresh = false` 正常入口下可靠重解析且不缓存错配摘要。
+   - **按强身份维护每文件最新观察 + 明确全零更正退选 + 跨文件代表重算（增量与冷库严格等价）**：
      - `history.db` v6 新增表 `event_file_observations(event_id, app, source_file, event_key, ts_seconds, ts_nanos, model_raw, model_identity, project_key, session_initial_cwd, event_cwd, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cache_write_5m, cache_write_1h, parser_revision, PRIMARY KEY (event_id, source_file))`（仅用于 `AgentKind::AntigravityCli`，不改既有四应用表/写入语义）；
      - 每次采集（含 `dedupe.rs` 同轮落败的跨文件副观察，透传至 `EventWrite`）按 `(event_id, norm_source_file)` **UPSERT** 该文件的最新观察（同一源文件改写时自动替换其旧观察，另一文件的观察不受影响）；
+     - **明确全零终值退选口径**：当源文件**成功完整稳定解析**（`io_errors == 0 && stable`），且某 `step_index` 经文件内后写收敛后的终值是一条合法已完成步骤（`PLANNER_RESPONSE|MODEL|DONE` 或带 token 字段的 `CHECKPOINT|SYSTEM|DONE`）且四桶全为 0（`skipped_zero_usage`）时，解析器产出显式退选标记 `(strong_id, norm_source_file)`：`history.rs` 从 `event_file_observations` 删除该 `(event_id, norm_source_file)` 旧观察并基于剩余观察重算代表（例如 `P=80, Q=70` 后 `P` 在同 `step_index` 写四桶全零终值 → `P` 旧观察退选，选出 `Q` 的 **`70`**；若 `P` 是唯一观察且被明确改写为全零，无剩余观察时该 `event_id` 同步退出 `usage_events`、`event_aliases` 与 `event_origins`），与冷库全扫完全一致；**文件删除、来源停用、读取失败（`io_errors > 0`）或采集中文件变化（`!stable`）绝不产出退选，仍严格沿用历史保留规则**；
      - 随后在 `event_file_observations WHERE event_id = ?` 全部当前文件最新观察上，应用与 `dedupe.rs` 相同的确定性跨文件代表规则（事件时间最晚 → 四桶 `total_u128()` 更大 → `event_key` 更大）选出胜出观察 `winner`，重新物化 `usage_events`（含同步 `usage_events.event_key`）：
-       - 例：`P=100` → `Q=70`（`{P:100, Q:70}` → `100`）→ `P` 改写为 `80`（`{P:80, Q:70}` → **`80`**）→ `P` 等长同 `mtime` 改写为 `60`（`{P:60, Q:70}` → **`70`**），每步均与冷库全扫完全一致；
-       - 源目录停用或文件删除不删除历史观察与 `usage_events`，已保存用量永久保留。
+       - 例：`P=100` → `Q=70`（`{P:100, Q:70}` → `100`）→ `P` 改写为 `80`（`{P:80, Q:70}` → **`80`**）→ `P` 等长同 `mtime` 改写为 `60`（`{P:60, Q:70}` → **`70`**）→ `P` 再改写为四桶全零（`{Q:70}` → **`70`**；单文件 `P=80 → 0` → **`0`**），每步均与冷库全扫完全一致；
+       - 源目录停用、文件删除或文件读错不删除历史观察与 `usage_events`，已保存用量永久保留。
    - **项目归属确定性优先级与防降级（先当前观察，后库内兜底）**：无论 `event_key` 是否因文件搬迁、行号重排或步骤改写而改变，物化 `usage_events` 时按严格三层优先级决定 `(project_key, session_initial_cwd, event_cwd)`：
      1. 若胜出观察 `winner` 有 `project_key.is_some()`，直接采用 `winner` 的三列项目字段；
      2. 否则，在 `event_file_observations WHERE event_id = ?` 的**全部当前文件观察**中筛选 `project_key.is_some()` 者，按同一确定性跨文件代表序（最新 `ts` → 更大 `total_u128()` → 更大 `event_key`）取最佳观察，并**从这同一条观察取齐 `project_key`、`session_initial_cwd`、`event_cwd` 三列**（保证 `Q` 把项目从 `A` 更正为 `B` 时，增量库立即更新为 `B`，与冷库扫描完全一致）；
@@ -131,7 +132,7 @@
      - 任何一步无法取得写入保护或一致视图，一律返回 `MappingState::Unusable`（不回退无保护读或磁盘打开、不缓存失败态、输出可读诊断；已入库事件按不变量 4 保留既有项目归属，新事件记未知项目）。
 6. **工作区缓存根隔离、内容摘要刷新、单轮冻结映射与失效粒度**：
    - 进程内工作区映射缓存以**规范化 DB 路径**（Windows 统一小写）为主键，以受保护持柄读出的 `(db_bytes, wal_bytes)` **SHA-256 内容摘要**判命中（彻底不依赖 Windows `mtime`，且避免同字节快照重复反序列化 SQLite）；不同手动根即使摘要库大小与修改时间相同也完全隔离、互不串用。
-   - **单轮冻结一致**：每次采集入口在进入 `collect_flighted_with_on` 前（单飞键构建前）为所有已启用 Antigravity CLI 根一次性冻结 `BTreeMap<PathBuf, Arc<WorkspaceMapping>>`，该冻结映射同时供 `collection_key`（计划模式与单根模式双分支，停用固定 `"disabled"` 且不读库）、`AntigravityCliSource` 解析器与 `remember_collection` 消费，杜绝「以修订 A 的采集键发布按修订 B 解析的结果」。
+   - **单轮冻结一致（覆盖 `begin_query_with(..., false)` 与采集全链）**：在 `begin_query_with` 入口（以及独立 `collect_only` / `collect_flighted` 入口）为所有已启用 Antigravity CLI 根一次性冻结 `BTreeMap<PathBuf, Arc<WorkspaceMapping>>`，该同一份冻结映射贯穿 `recent_collection`（含 `key` 与 `all_key`）、未命中时回退的 `collect_flighted_with_on` / `collection_key`（计划模式与单根模式双分支，停用固定 `"disabled"` 且不读库）/ `AntigravityCliSource` 解析器 / `remember_collection`，以及 `main_fingerprint`（`query.rs:571`），杜绝「仅摘要库变更时误复用旧缓存」或「采集键、解析结果与查询指纹使用不同修订」。
    - **失效粒度**：`revision` 仅对 `(state, 排序后的 conversation_id -> normalized_project 映射表)` 计算确定性摘要（不含 `title`、`preview`、`last_modified_time` 或 WAL 字节摘要）：
      - 同会话继续聊天更新摘要库但 `(conversation_id -> workspace)` 映射集合未变时，`revision` 保持不变，不触发整根 transcript 重解析；
      - 仅当新会话出现有效工作区、已有会话工作区变化或 DB 状态迁移（`missing ↔ loaded ↔ unusable`）时，`revision` 才变化，按现有 `Source::context_revision` 机制使该根下文件缓存失效并整根重解析一次（与 Claude 项目映射同粒度）。
@@ -142,8 +143,8 @@
 8. **项目身份与时间口径**：`workspace_uris` 首个经 `project_path::normalize_project_path` 成功的 URI 作为会话项目身份，跨五应用同一目录归同一 key；`created_at` 按 UTC RFC3339 原样存储（步骤开始时刻），缺失或非法计 `bad_lines` 跳过，展示沿用既有单次时区转换。
 9. **同意先于读取**：`PRIVACY_POLICY_REVISION` 升至 4，旧同意（修订 1/2/3）升级后进入 `StaleRevision`，零业务读取；重新同意原子落盘后才读取五个应用。
 10. **验收根三端写前全路径拦截（含联接与硬链接 `nlink > 1`）与测试密闭**：
-    - Rust（`acceptance.rs`）、PowerShell（`prepare-native-acceptance.ps1`）、Node（`native-single-instance.mjs`）三处入口在**首次创建目录或写盘之前**，均须按规范化真实路径（解析最长存在祖先与符号链接/Windows 联接目标）拒绝真实受保护目录（`.tokenscope`、`.claude`、`.codex`、`.cc-switch`、`.workbuddy`、`.workbuddy-ai`、`.gemini/antigravity-cli`）的**相等路径、祖先路径、任意新/旧子目录与联接别名**（主目录本身拒相等与祖先）；
-    - PowerShell 复用带 `manifest.json` 的已有旧根时，还必须在首笔写入前**不跟随链接遍历已有整树，拒绝任何内部联接/符号链接/重解析点，并沿用 Node 已有规则（`native-single-instance.mjs:681`）拒绝任何硬链接数 `nlink > 1` 的已有普通文件（避免 `WriteAllText` 原位覆盖根外文件）；同时逐一核对全部拟写目录与目标文件的最长存在祖先均落在规范化 `-Root` 内且在受保护目录之外**；拒绝后磁盘两端零新增/零改动。全仓构造 `SummaryOptions` / `DiscoveryContext` 的测试必须密闭注入隔离根。
+    - Rust（`acceptance.rs` + `acceptance_trace.rs`）、PowerShell（`prepare-native-acceptance.ps1`）、Node（`native-single-instance.mjs`）三处入口在**首次创建目录或写盘（含直接启动追加 `acceptance-trace.jsonl`）之前**，均须按规范化真实路径（解析最长存在祖先与符号链接/Windows 联接目标）拒绝真实受保护目录（`.tokenscope`、`.claude`、`.codex`、`.cc-switch`、`.workbuddy`、`.workbuddy-ai`、`.gemini/antigravity-cli`）的**相等路径、祖先路径、任意新/旧子目录与联接别名**（主目录本身拒相等与祖先）；
+    - Rust 直接启动验收根校验与 PowerShell 复用带 `manifest.json` 旧根时，均必须在首笔写入前**不跟随链接遍历已有整树，拒绝任何内部联接/符号链接/重解析点，并沿用 Node 已有规则（`native-single-instance.mjs:681`）拒绝任何硬链接数 `nlink > 1` 的已有普通文件（避免原位写盘或 `acceptance-trace.jsonl` 追加改到根外同一文件）；同时逐一核对全部拟写目录与目标文件的最长存在祖先均落在规范化隔离根内且在受保护目录之外**；拒绝后磁盘两端零新增/零改动。全仓构造 `SummaryOptions` / `DiscoveryContext` 的测试必须密闭注入隔离根。
 
 ---
 
@@ -155,7 +156,7 @@
 | --- | --- |
 | AG01 | `crates/tokenscope-core/src/{model,dedupe,history,pricing,model_display,aggregate,report}.rs`、`crates/tokenscope-core/src/import/ccs.rs`、`crates/tokenscope-core/tests/history_migration.rs`、`src-tauri/src/commands.rs`、`scripts/inspect_history.py`、`scripts/test_inspect_history.py` |
 | AG02 | `crates/tokenscope-core/Cargo.toml`（`rusqlite` 启用内置 `serialize`）、新增 `crates/tokenscope-core/src/source/antigravity_cli.rs`、`crates/tokenscope-core/tests/antigravity_cli_source.rs`、`crates/tokenscope-core/tests/fixtures/antigravity_cli/`；接入 `src/source/mod.rs`、`src/report.rs`（`AntigravityCli` 内容指纹） |
-| AG03 | `crates/tokenscope-core/src/{settings,acceptance,report}.rs`、`crates/tokenscope-core/src/source/discovery.rs`、`scripts/prepare-native-acceptance.ps1`、`frontend/scripts/lib/native-single-instance.mjs`、`scripts/fixtures/settings_migrations.json`、`scripts/test_upgrade_fixture.py`、相关 Rust/PS/Node 测试与全仓测试密闭审计 |
+| AG03 | `crates/tokenscope-core/src/{settings,acceptance,acceptance_trace,query,report}.rs`、`crates/tokenscope-core/src/source/discovery.rs`、`scripts/prepare-native-acceptance.ps1`、`frontend/scripts/lib/native-single-instance.mjs`、`scripts/fixtures/settings_migrations.json`、`scripts/test_upgrade_fixture.py`、相关 Rust/PS/Node 测试与全仓测试密闭审计 |
 | AG04 | `crates/tokenscope-core/src/settings.rs`、`docs/privacy.md`、`scripts/{upgrade_fixture.py,test_upgrade_fixture.py,test_upgrade_helpers.ps1,prepare-native-acceptance.ps1}`、`frontend/` 隐私 mock 与原生同意测试 |
 | AG05 | `frontend/src/{types.ts,lib/viewFilters.ts,components/AgentIcon.vue,views/Dashboard.vue,views/Settings.vue,lib/locales/zh-CN.ts,lib/locales/en-US.ts}`、相关单测与 UI 契约、`DESIGN.md` |
 | AG06 | `scripts/prepare-native-acceptance.ps1`、`frontend/scripts/contracts/native-identity.mjs`、`frontend/scripts/lib/native-unified.mjs`、`frontend/scripts/native-acceptance.mjs` 及纯函数契约测试 |
@@ -170,14 +171,14 @@
 - `history.rs`（`HISTORY_SCHEMA_VERSION: 5 → 6`）与 `report.rs`：
   - v6 幂等迁移新增 `event_file_observations` 表（不改既有表行，保留升级前备份）；同步 `tests/history_migration.rs` 等处硬编码 `== 5` 的版本断言；
   - `event_write_of` 对 `AntigravityCli` 的 `UNKNOWN_PROJECT` 写 `project_key: None`（与 CCS `import/ccs.rs:940` 一致），并携带各源文件的规范化观察；
-  - `AntigravityCli` 写入按 `(event_id, norm_source_file)` UPSERT 最新文件观察，再在 `event_file_observations WHERE event_id = ?` 全集合上按统一跨文件代表规则重算胜出观察 `winner` 并更新 `usage_events`（含同步 `usage_events.event_key`）；项目归属严格执行不变量 4 的三层优先级（① `winner` 有项目取 `winner` → ② 否则从当前所有带项目的观察按确定性代表序选一条取齐 `project_key`/`session_initial_cwd`/`event_cwd` → ③ 仅当全部当前观察均缺项目才沿用 `existing` 上次确认值）。
+  - `AntigravityCli` 写入按 `(event_id, norm_source_file)` UPSERT 最新文件观察，并对成功完整稳定解析文件产出的显式全零终值退选删除对应 `(event_id, norm_source_file)` 旧观察（若 `event_file_observations WHERE event_id = ?` 变空则同步移出 `usage_events`/`event_aliases`/`event_origins`），再在剩余全部当前观察上按统一跨文件代表规则重算胜出观察 `winner` 并更新 `usage_events`（含同步 `usage_events.event_key`）；项目归属严格执行不变量 4 的三层优先级（① `winner` 有项目取 `winner` → ② 否则从当前所有带项目的观察按确定性代表序选一条取齐 `project_key`/`session_initial_cwd`/`event_cwd` → ③ 仅当全部当前观察均缺项目才沿用 `existing` 上次确认值）。
 - `pricing.rs`、`model_display.rs`、`aggregate.rs`、`report.rs`：
   - 在汇总与明细共用的计价入口新增应用感知判断（`estimate_for_agent`）：对 `AntigravityCli` 且 `model.trim().eq_ignore_ascii_case(UNKNOWN_MODEL)` 无条件返回 `None`；
   - 展示名目录查询对 `AntigravityCli` 的 `UNKNOWN_MODEL` 返回未解析，聚合层按 `docs/stats-semantics.md:699` 以原始模型 ID 填充最终模型分组 `label`（`Some("unknown")`）。
 - `import/ccs.rs`、`src-tauri/src/commands.rs`、`scripts/inspect_history.py` 与 `scripts/test_inspect_history.py`：补齐 `"antigravity-cli"` 映射/白名单，CCS 保持不支持，保留未知 app 拒绝断言。
 - 必测回归：
   - **真实 v5 → v6 历史库升级测试（必测）**：构造真实 v5 库结构（含既有事件、别名、来源、`cache_write_5m`/`cache_write_1h` 与 `user_version = 5`），经 `HistoryDb::open` 升级至 v6，断言备份生成、新表 `event_file_observations` 就绪、原事实与别名无损，以及第二次打开幂等不重复备份；
-  - **三轮/四轮跨文件更正与等长同 `mtime` 回归（必测）**：Round 1 `P = 100` → Round 2 `Q = 70`（得 100）→ Round 3 `P` 同刻改写为 `80`（得 **`80`**）→ Round 4 `P` **保持文件字节长度与 `mtime` 不变**改写为 `60` 并以 **`refresh = false`** 走正常入口（靠内容指纹触发重解析，增量库收敛到 **`70`**），每步均与冷库全扫逐项一致；另测同轮冷扫 `{P=80, Q=70}` 后下轮仅改 `P → 60` 仍得 `70`；
+  - **跨文件更正、等长同 `mtime` 与全零终值退选回归（必测）**：① Round 1 `P = 100` → Round 2 `Q = 70`（得 100）→ Round 3 `P` 同刻改写为 `80`（得 **`80`**）→ Round 4 `P` **保持文件字节长度与 `mtime` 不变**改写为 `60` 并以 **`refresh = false`** 走正常入口（靠实际字节内容指纹触发重解析，增量库收敛到 **`70`**）；② **明确全零终值从胜出者退选**：从 `{P=80, Q=70}`（`P` 胜出，总量 **`80`**）出发，下一轮仅让 `P` 在同 `step_index` 写入合法已完成四桶全零终值（可含等长同 `mtime`），断言 `P` 旧观察退出代表选择、增量库由 **`80` 降为 `Q` 的 `70`**（与冷库全扫一致）；③ 单文件 `P = 80 → 0`（明确全零终值使事件退出，得 **`0`**，冷热一致）；④ `P` 被删除、来源停用或读取失败（`io_errors > 0`）时不退选、仍保留历史 **`80`**；⑤ 同轮冷扫 `{P=80, Q=70}` 后下轮仅改 `P → 60` 同样收敛到 **`70`**；
   - **项目更正优先级与防降级（必测）**：① `P` 为用量胜出者但缺项目、`Q` 初始提供项目 `A` 入库 → `Q` 将项目更正为 `B` 后增量库更新为 **`B`**（且 `session_initial_cwd`/`event_cwd` 同源取自 `Q`），与冷库一致；② 全部当前观察均缺项目（如摘要库缺失/不可读，含文件搬迁/行号重排/token 改写）时保留库内已确认项目不降级；
   - **有效外置 `pricing.toml` 未知模型拦截（必测）**：使用合法 `[[model]]` 配置 `prefix = "unknown"` 与 `prefix = "provider/unknown"` 的非零单价；**先正例断言**普通 `pricing.estimate("unknown", ...)` 确实命中外置价格，**再反例断言**：名称目录查询返回未解析；汇总纯未知模型分组满足 `total_cost_usd == None`、`unknown_pricing == true`、`unknown_tokens == 事件全量`、`label.as_deref() == Some("unknown")`；请求明细行满足 `model == "unknown"`、`cost_usd == None`、`cost_breakdown == None`；同报告已知模型正常计价。
 
@@ -192,17 +193,17 @@
   - 仅定位 `<root>/conversation_summaries.db`，绝不向上越界；
   - 按不变量 5 在 Windows 上以 `share_mode(FILE_SHARE_READ)` 短暂持柄读取 `db`、校验 `-journal`、读取可选 `-wal`（读入总字节 ≤ 64 MiB）后立刻释柄；在纯内存按官方 WAL 三分类（旧代残留 / 未提交尾帧 / 同代完整帧校验失败）与扩展后映像 ≤ 64 MiB 重放，调用 `conn.deserialize_read_exact(rusqlite::MAIN_DB, image.as_slice(), image.len(), true)` 载入 `:memory:`，仅执行 `SELECT conversation_id, workspace_uris FROM conversation_summaries`；
   - 进程内缓存键为**规范化 DB 路径**（Windows 小写），值以持柄读出快照的 `(db_bytes, wal_bytes)` **SHA-256 内容摘要**判命中（不依赖 Windows `mtime`）；失败态 `Unusable` 不进缓存、输出诊断；`revision` 仅对 `(state, 排序后的 conv_id -> normalized_project)` 计算摘要。
-- **单文件解析与内容指纹**：
-  - `report.rs` 对 `AgentKind::AntigravityCli` 的文件缓存指纹采用 `size:mtime_ms:sha256`（仅作用于 Antigravity CLI，不影响现有四应用）；
+- **单文件解析与实际读入字节内容指纹**：
+  - `AntigravityCliSource::parse_file` 单次读入完整字节缓冲后，对**同一份输入字节**计算 SHA-256 并随 `FileParse` 回传 `content_sha256`（同时产出成功完整解析下终值为四桶全零步骤的显式退选强身份）；`report.rs` 仅对 `AgentKind::AntigravityCli` 使用 `size:mtime_ms:sha256` 判缓存命中，且在解析后复核大小、`mtime` 与解析后文件 SHA-256 均等于**实际读入字节的 `content_sha256`** 才登记该摘要并应用退选（探测与解析间若发生 `A → B → A` 等长切换，判 `unstable` 不登记指纹、不应用退选；不影响其余四应用快路径）；
   - `session_id = <conv_id>`；逐行 serde 宽松解码，畸形 JSON 计 `bad_lines`；按 `step_index` 收敛到 `BTreeMap<u64, ParsedStep>`（后写覆盖前写，记录最终行号）；
   - 按 `step_index` 升序遍历，仅对 `USER_INPUT|USER_EXPLICIT` 在最后一个 `</USER_REQUEST>` 之后的 `<USER_SETTINGS_CHANGE>` 块内提取 `Model Selection`；对准入的 `PLANNER_RESPONSE|MODEL|DONE` 与带 token 的 `CHECKPOINT|SYSTEM|DONE` 执行 FRESH 桶映射、受检算术、`validate_buckets()`、UTC 时间校验、模型回退 `UNKNOWN_MODEL`、工作区回退 `UNKNOWN_PROJECT`。
 - **合成 fixture 契约测试（`tests/antigravity_cli_source.rs`）**：
   - 发现：根不存在；空会话目录；忽略 `transcript_full.jsonl`、`chunks/**/*.jsonl`、`conversations/*.db`、`history.jsonl`、`scratch/*.jsonl`；联接环/断链；直接指向 `brain/` 根。
   - **写保护零写入快照专项（必测两类状态 + WAL 三分类）**：
-    - **状态 A（写者已退出、留有已提交 WAL 且无 `-shm`）**：构造 WAL 合成库将最新工作区仅提交到 `-wal`（不 checkpoint），关闭写连接并删除 `-shm` → 持 `FILE_SHARE_READ` 读出最新路径，且源目录未创建 `-shm`、文件清单与全部字节/mtime 零变化；
+    - **状态 A（写者已退出、留有已提交 WAL 且无 `-shm`）**：合成写连接启用 `DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE` 将最新工作区仅提交到 `-wal` 后正常关闭并删除 `-shm`；**调用适配器前先断言单读主库映像仍为旧路径、最新路径只存在于 `-wal`** → 再调用适配器以 `FILE_SHARE_READ` 读出最新路径，且源目录未创建 `-shm`、文件清单与全部字节/mtime 零变化；
     - **状态 B（写者正在持柄，含提交前脏页写回主库）**：① 回滚日志模式下开启未提交事务写入 1,200 行迫使脏页刷入主库且未提交（持柄中）→ 加载器被内核拒绝共享写，返回 `MappingState::Unusable`，绝不读出未提交脏页；② WAL 模式下写连接持柄未关闭 → 同样返回 `MappingState::Unusable`；两种情形下均断言源目录零写入、老事件保原项目、新事件记未知；另测崩溃遗留非空 `-journal` 返回 `Unusable`；
     - **WAL 三分类与双重 64 MiB 上限**：① checkpoint 后旧代残留帧（不同 salt）→ 正常截断并应用此前提交；② 未提交尾帧（同代合法校验和但 `db_size == 0`）与最后提交后的 EOF 不足一帧残尾 → 忽略尾部、应用此前提交；③ WAL 头损坏或**同代完整帧翻字节致校验失败** → 必须返回 `Unusable`（绝不静默回退旧提交）；④ 实际读入字节超 64 MiB 与 `db_size_after_commit * page_size` 扩展映像超 64 MiB 均返回 `Unusable`。
-  - **双根缓存隔离、单轮冻结映射与失效粒度专项（必测）**：两个不同手动根下放置大小与修改时间相同但内容不同的 `conversation_summaries.db`，各自命中正确项目不串用；修改已有会话 `title`/`last_modified_time`（不改 `workspace_uris`）验证 `revision` 不变、不触发重解析；仅向摘要库新增工作区记录（即便保持相同 `mtime`）验证 `revision` 与 `collection_key` 同步变化且下次查询（`refresh = false`）立即补齐项目路径；验证单轮 `collection_key`、解析器与 `remember_collection` 消费同一冻结映射。
+  - **双根缓存隔离、实际字节指纹与失效粒度专项（必测）**：两个不同手动根下放置大小与修改时间相同但内容不同的 `conversation_summaries.db`，各自命中正确项目不串用；验证 `report.rs` 登记的 `AntigravityCli` 指纹来自解析器实际读入字节的 SHA-256（含模拟探测/解析间等长改写不登记错配指纹）；修改已有会话 `title`/`last_modified_time`（不改 `workspace_uris`）验证 `revision` 不变、不触发重解析；仅向摘要库新增工作区记录（即便保持相同 `mtime`）验证 `revision` 与 `collection_key` 同步变化且下次查询（`refresh = false`）立即补齐项目路径。
   - **普通用户消息引用切换模板反例（必测）**：`<USER_REQUEST>` 内用户消息原文包含 `The user changed setting \`Model Selection\` from None to Fake Model (High).` 及伪造 `<USER_SETTINGS_CHANGE>...</USER_SETTINGS_CHANGE>`，均**不得**改变 `session_model`；`PLANNER_RESPONSE` / `GENERIC` 正文同理不误匹配；只有 `</USER_REQUEST>` 之后真实系统块 `<USER_SETTINGS_CHANGE>` 才生效，且原文绝不出现在任何事件字段或诊断文本中。
   - 口径、步骤准入、畸形容错与跨日时间边界测试同前（FRESH、`CHECKPOINT`、`output == 0` 保留、全 0 跳、坏行计数、`file://` 百分号编码中文路径与 Claude 同 key、UTC 跨日）。
 
@@ -216,12 +217,12 @@
   - `"2->4"`：`sources.workbuddy.enabled` / `sources.workbuddy_ai.enabled` / `sources.antigravity_cli.enabled` 的 `default(true, allow_missing=true)`；
   - `"3->4"`：仅 `sources.antigravity_cli.enabled` 的 `default(true, allow_missing=true)`（保留 v3 用户对 WorkBuddy 的显式配置）；
   - `"4->4"`：**恒等迁移（`"operations": []`）**，新增单测验证 `sources.antigravity_cli.enabled = false` 在 `4->4` 升级校验下通过且保持停用。
-- `source/discovery.rs` 与 `report.rs`：
+- `source/discovery.rs`、`query.rs` 与 `report.rs`：
   - 固定候选集追加 `AntigravityCli` 默认根 `~/.gemini/antigravity-cli`，跨应用冲突与同应用重叠沿用 `resolve_sources`；
-  - 在采集入口为本轮一次性冻结已启用 Antigravity CLI 根的 `WorkspaceMapping`，由 `collection_key`（`Some(plans)` 与 `None` 双分支，停用固定 `"disabled"`）、`AntigravityCliSource` 解析器与 `remember_collection` 共用同一冻结映射；
+  - 在 `begin_query_with` 与独立采集入口一次性冻结已启用 Antigravity CLI 根的 `WorkspaceMapping`，贯穿 `recent_collection`（`query.rs:561`，含 `key` 与 `all_key`）、回退/直调的 `collection_key`（`Some(plans)` 与 `None` 双分支，停用固定 `"disabled"`）/ `AntigravityCliSource` 解析器 / `remember_collection` 以及 `main_fingerprint`（`query.rs:571`）；**专项验收 `begin_query_with(..., false)`**：首次采集建缓存后，仅修改 `conversation_summaries.db` 新增或变更工作区映射，再调用 `begin_query_with(opts, false)`，断言 `recent_collection` 识别旧缓存失效、触发重采并补齐新项目，且查询快照的 `main_fingerprint` 与本轮冻结映射修订完全一致；
   - `SummaryOptions` 增加 `antigravity_cli_dir` 与 `antigravity_cli_enabled`，审计全仓所有测试构造点补齐密闭注入。
 - **三处验收根写前全路径保护入口同步加固**：
-  1. `crates/tokenscope-core/src/acceptance.rs`：`source_dir_override(AntigravityCli)` → `<root>/sources/antigravity-cli`；受保护清单追加 `home_canon.join(".gemini").join("antigravity-cli")`；所有受保护应用目录（`.tokenscope`、`.claude`、`.codex`、`.workbuddy`、`.workbuddy-ai`、`.gemini/antigravity-cli`）均同时拒绝相等、祖先、任意子目录（`canon.starts_with(&protected)`）与联接别名（用户主目录 `home_canon` 仍只拒相等与祖先）；
+  1. `crates/tokenscope-core/src/acceptance.rs` 与 `crates/tokenscope-core/src/acceptance_trace.rs`：`source_dir_override(AntigravityCli)` → `<root>/sources/antigravity-cli`；受保护清单补齐 `home_canon.join(".cc-switch")` 与 `home_canon.join(".gemini").join("antigravity-cli")`（全部 7 个真实目录：`.tokenscope`、`.claude`、`.codex`、`.cc-switch`、`.workbuddy`、`.workbuddy-ai`、`.gemini/antigravity-cli` 均同时拒绝相等、祖先、任意子目录 `canon.starts_with(&protected)` 与联接别名；用户主目录 `home_canon` 只拒相等与祖先）；在 `trace::bootstrap`、`create_dir_all` 及 `acceptance_trace.rs:174` 首次打开追加 `acceptance-trace.jsonl` 之前，**不跟随链接遍历隔离根已有整树，拒绝任何内部联接/符号链接/重解析点以及 `nlink > 1` 的硬链接普通文件（并在 `acceptance_trace.rs` 打开追踪文件前再次复核非链接且 `nlink == 1`）**；新增**直接启动 Rust 验收初始化单测**：在合法隔离根中预置指向根外普通文件的 `acceptance-trace.jsonl` 硬链接（`nlink = 2`），直接调用 Rust 验收引导与追踪入口，断言拒绝退出且根内外两端文件零改动；
   2. `scripts/prepare-native-acceptance.ps1`：在任何 `New-Item` / 写盘之前完成两层预检：① 解析 `-Root` 与全部受保护目录（补充 `.workbuddy`、`.workbuddy-ai`、`.gemini\antigravity-cli`、`.cc-switch`）的最长存在祖先真实路径，按路径分量边界拦截相等、祖先、新/旧子目录与联接别名；② 复用已有带 `manifest.json` 的旧根时，**不跟随链接遍历已有整树拒绝任何内部联接/符号链接/重解析点，并沿用 Node 已有规则（`native-single-instance.mjs:681`）经 `GetFileInformationByHandle` 检查拒绝任何 `nlink > 1` 的已有硬链接普通文件，同时逐一校验所有拟写目录与目标文件的最长存在祖先均落在规范化 `-Root` 内且在受保护目录之外**；单测用临时目录分别构造「合法带 `manifest.json` 旧根 + `sources\antigravity-cli` 内部联接指向外部目录」与「合法带 `manifest.json` 旧根 + 拟写目标为指向外部文件的硬链接（`nlink = 2`）」，直接调用 PowerShell 脚本，断言两种均拒绝退出且两端零新增/零改动；
   3. `frontend/scripts/lib/native-single-instance.mjs`：`getUserProtectedDirs` 追加 `path.join(dir, ".gemini", "antigravity-cli")`，补充覆盖真实根、祖先 `~/.gemini`、新子目录 `~/.gemini/antigravity-cli/new-sub` 与联接别名的契约测试，断言拒绝后零新增文件/目录。
 
